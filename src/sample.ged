@@ -1,0 +1,216 @@
+0 HEAD
+1 SOUR GENIE
+2 NAME Genie
+1 GEDC
+2 VERS 5.5.1
+2 FORM LINEAGE-LINKED
+1 CHAR UTF-8
+1 NOTE A fictional family used to demonstrate Genie.
+0 @I1@ INDI
+1 NAME Thomas /Hartwell/
+1 SEX M
+1 BIRT
+2 DATE 14 MAR 1842
+2 PLAC Bristol, Gloucestershire, England
+1 OCCU Shipwright
+1 EMIG
+2 DATE 1868
+2 PLAC Liverpool, England
+1 IMMI
+2 DATE JUN 1868
+2 PLAC Boston, Massachusetts, USA
+1 DEAT
+2 DATE 2 NOV 1911
+2 PLAC Gloucester, Massachusetts, USA
+1 BURI
+2 DATE 6 NOV 1911
+2 PLAC Oak Grove Cemetery, Gloucester, Massachusetts, USA
+1 NOTE Built fishing schooners in Gloucester for over forty years.
+1 SOUR @S1@
+2 PAGE Vol. 3, p. 112
+1 FAMS @F1@
+0 @I2@ INDI
+1 NAME Margaret /Doyle/
+1 SEX F
+1 BIRT
+2 DATE ABT 1846
+2 PLAC Cork, Ireland
+1 DEAT
+2 DATE 19 JAN 1920
+2 PLAC Gloucester, Massachusetts, USA
+1 FAMS @F1@
+0 @I3@ INDI
+1 NAME William James /Hartwell/
+1 SEX M
+1 BIRT
+2 DATE 3 AUG 1870
+2 PLAC Gloucester, Massachusetts, USA
+1 OCCU Sea captain
+1 CENS
+2 DATE 1900
+2 PLAC Gloucester, Massachusetts, USA
+1 DEAT
+2 DATE 11 FEB 1934
+2 PLAC Gloucester, Massachusetts, USA
+1 FAMC @F1@
+1 FAMS @F2@
+0 @I4@ INDI
+1 NAME Eliza /Hartwell/
+1 SEX F
+1 BIRT
+2 DATE 22 DEC 1872
+2 PLAC Gloucester, Massachusetts, USA
+1 DEAT
+2 DATE 1958
+2 PLAC Portland, Maine, USA
+1 FAMC @F1@
+0 @I5@ INDI
+1 NAME Henry /Hartwell/
+1 SEX M
+1 BIRT
+2 DATE 1875
+2 PLAC Gloucester, Massachusetts, USA
+1 DEAT
+2 DATE 1877
+1 FAMC @F1@
+0 @I6@ INDI
+1 NAME Clara Belle /Matthews/
+1 SEX F
+1 BIRT
+2 DATE 9 APR 1874
+2 PLAC Rockport, Massachusetts, USA
+1 DEAT
+2 DATE 30 SEP 1949
+2 PLAC Gloucester, Massachusetts, USA
+1 FAMC @F3@
+1 FAMS @F2@
+0 @I7@ INDI
+1 NAME Samuel /Matthews/
+1 SEX M
+1 BIRT
+2 DATE ABT 1840
+2 PLAC Rockport, Massachusetts, USA
+1 OCCU Stonecutter
+1 DEAT
+2 DATE 1901
+2 PLAC Rockport, Massachusetts, USA
+1 FAMS @F3@
+0 @I8@ INDI
+1 NAME Ruth /Pool/
+1 SEX F
+1 BIRT
+2 DATE 1845
+2 PLAC Rockport, Massachusetts, USA
+1 DEAT
+2 DATE 1912
+1 FAMS @F3@
+0 @I9@ INDI
+1 NAME Arthur /Hartwell/
+1 SEX M
+1 BIRT
+2 DATE 17 MAY 1898
+2 PLAC Gloucester, Massachusetts, USA
+1 EDUC Harvard College
+2 DATE 1920
+1 OCCU Physician
+1 DEAT
+2 DATE 4 JUL 1976
+2 PLAC Salem, Massachusetts, USA
+1 FAMC @F2@
+1 FAMS @F4@
+0 @I10@ INDI
+1 NAME Dorothy /Hartwell/
+1 SEX F
+1 BIRT
+2 DATE 2 FEB 1901
+2 PLAC Gloucester, Massachusetts, USA
+1 DEAT
+2 DATE 1987
+1 FAMC @F2@
+0 @I11@ INDI
+1 NAME Helen Marie /Kowalski/
+1 SEX F
+1 BIRT
+2 DATE 28 OCT 1903
+2 PLAC Lowell, Massachusetts, USA
+1 DEAT
+2 DATE 12 DEC 1990
+2 PLAC Salem, Massachusetts, USA
+1 FAMS @F4@
+0 @I12@ INDI
+1 NAME Robert Arthur /Hartwell/
+1 SEX M
+1 BIRT
+2 DATE 5 JAN 1930
+2 PLAC Salem, Massachusetts, USA
+1 OCCU Engineer
+1 FAMC @F4@
+1 FAMS @F5@
+0 @I13@ INDI
+1 NAME Joan /Hartwell/
+1 SEX F
+1 BIRT
+2 DATE 1933
+2 PLAC Salem, Massachusetts, USA
+1 FAMC @F4@
+0 @I14@ INDI
+1 NAME Linda /Ferris/
+1 SEX F
+1 BIRT
+2 DATE 1934
+2 PLAC Hartford, Connecticut, USA
+1 FAMS @F5@
+0 @I15@ INDI
+1 NAME Michael /Hartwell/
+1 SEX M
+1 BIRT
+2 DATE 1958
+2 PLAC Hartford, Connecticut, USA
+1 FAMC @F5@
+0 @I16@ INDI
+1 NAME Susan /Hartwell/
+1 SEX F
+1 BIRT
+2 DATE 1961
+2 PLAC Hartford, Connecticut, USA
+1 FAMC @F5@
+0 @F1@ FAM
+1 HUSB @I1@
+1 WIFE @I2@
+1 MARR
+2 DATE 1869
+2 PLAC Boston, Massachusetts, USA
+1 CHIL @I3@
+1 CHIL @I4@
+1 CHIL @I5@
+0 @F2@ FAM
+1 HUSB @I3@
+1 WIFE @I6@
+1 MARR
+2 DATE 12 JUN 1896
+2 PLAC Rockport, Massachusetts, USA
+1 CHIL @I9@
+1 CHIL @I10@
+0 @F3@ FAM
+1 HUSB @I7@
+1 WIFE @I8@
+1 CHIL @I6@
+0 @F4@ FAM
+1 HUSB @I9@
+1 WIFE @I11@
+1 MARR
+2 DATE 1928
+2 PLAC Boston, Massachusetts, USA
+1 CHIL @I12@
+1 CHIL @I13@
+0 @F5@ FAM
+1 HUSB @I12@
+1 WIFE @I14@
+1 MARR
+2 DATE 1956
+1 CHIL @I15@
+1 CHIL @I16@
+0 @S1@ SOUR
+1 TITL Gloucester Shipbuilders' Register
+1 AUTH Cape Ann Historical Society
+0 TRLR
