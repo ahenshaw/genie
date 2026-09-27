@@ -591,7 +591,7 @@ pub struct FoundFile {
 /// Documents with nothing to show: a file that isn't where the tree says,
 /// or no file at all.
 pub fn needs_file(tree: Option<&Path>, m: &MediaItem) -> bool {
-    !m.has_file() || resolve(tree, &m.file).is_none_or(|p| !p.exists())
+    !m.has_file() || resolve(tree, &m.file).is_none_or(|p| !crate::platform::exists(&p))
 }
 
 /// Looks under `folder` for files for documents that need one: by file

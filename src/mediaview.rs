@@ -36,7 +36,7 @@ pub fn index(ctx: &egui::Context, doc: &Document) -> Arc<HashMap<String, Vec<Med
 
 /// A file is recorded but isn't where the tree says.
 pub fn is_missing(ctx: &egui::Context, item: &MediaItem) -> bool {
-    item.has_file() && media::resolve(tree_path(ctx).as_deref(), &item.file).is_none_or(|p| !p.exists())
+    item.has_file() && media::resolve(tree_path(ctx).as_deref(), &item.file).is_none_or(|p| !crate::platform::exists(&p))
 }
 
 /// A thumbnail: the image itself, or the file type for other files.
@@ -120,13 +120,13 @@ fn thumb_menu(resp: &egui::Response, doc: &Document, item: &MediaItem, person: O
 
 /// Opens the file (or its folder) with the system's own application.
 pub fn open_file(ctx: &egui::Context, item: &MediaItem, folder: bool) {
-    let Some(path) = media::resolve(tree_path(ctx).as_deref(), &item.file).filter(|p| p.exists()) else {
+    let Some(path) = media::resolve(tree_path(ctx).as_deref(), &item.file).filter(|p| crate::platform::exists(p)) else {
         elegance::Toast::new("File not found").tone(BadgeTone::Warning).description(item.file.clone()).show(ctx);
         return;
     };
     let target = if folder { path.parent().map(PathBuf::from).unwrap_or(path) } else { path };
-    if let Err(e) = open::that_detached(&target) {
-        elegance::Toast::new("Couldn't open it").tone(BadgeTone::Danger).description(e.to_string()).show(ctx);
+    if let Err(e) = crate::platform::open_path(ctx, &target) {
+        elegance::Toast::new("Couldn't open it").tone(BadgeTone::Danger).description(e).show(ctx);
     }
 }
 
@@ -652,7 +652,7 @@ impl MediaUi {
         }
         if replace
             && let Some(tree) = doc.path.clone()
-            && let Some(src) = rfd::FileDialog::new().pick_file()
+            && let Some(src) = crate::platform::pick_file(None)
         {
             match media::import_file(&tree, &src) {
                 Ok(rel) => ed.item.file = rel,

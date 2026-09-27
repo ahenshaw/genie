@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Genie</title>
+    <!-- The browser build of Genie; `trunk build --release` puts it in dist/ for `genie --serve`. -->
+    <link data-trunk rel="rust" data-bin="genie" data-wasm-opt="2">
+    <style>
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #1c1f24; }
+        canvas { display: block; width: 100%; height: 100%; }
+    </style>
+</head>
+<body>
+    <canvas id="genie_canvas"></canvas>
+</body>
+</html>

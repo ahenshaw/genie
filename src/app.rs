@@ -13,6 +13,7 @@ use elegance::{
 use crate::graph::{FamilyGraph, LinkMode};
 use crate::model::{self, CitationForm, CiteSource, Document, FactKey, PersonForm, Relation, Sex};
 use crate::mediaview::MediaUi;
+use crate::platform::{self, ServerEvent};
 use crate::relation::RelationView;
 use crate::tools::ToolsUi;
 use crate::tree::TreeView;
@@ -144,6 +145,12 @@ pub struct GenieApp {
     allow_close: bool,
     title: String,
     actions: Vec<Action>,
+    /// In the browser: where the tree comes from and is saved to.
+    server: platform::Server,
+    /// Waiting for the server to send the tree, or why it couldn't.
+    server_load: Option<Result<(), String>>,
+    /// The revision being saved to the server.
+    saving: Option<u64>,
 }
 
 impl GenieApp {
@@ -178,6 +185,9 @@ impl GenieApp {
             allow_close: false,
             title: String::new(),
             actions: Vec::new(),
+            server: platform::Server::default(),
+            server_load: None,
+            saving: None,
         };
         if let Some(storage) = cc.storage {
             if let Some(t) = storage.get_string("theme")
@@ -205,7 +215,9 @@ impl GenieApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // Reopen whatever file was open when Genie last quit, unless one was
         // named on the command line or the file has since gone away.
-        if let Some(path) = open.or(last_open.filter(|p| p.is_file())) {
+        if platform::WEB {
+            app.load_from_server(&cc.egui_ctx);
+        } else if let Some(path) = open.or(last_open.filter(|p| p.is_file())) {
             app.load_path(&cc.egui_ctx, &path);
         }
         app
@@ -241,23 +253,8 @@ impl GenieApp {
     fn load_path(&mut self, ctx: &egui::Context, path: &Path) {
         match std::fs::read(path) {
             Ok(bytes) => {
-                let (mut doc, notes) = Document::from_bytes(&bytes);
-                doc.path = Some(path.to_path_buf());
-                let (people, fams) = (doc.people().len(), doc.family_count());
-                self.set_doc(doc);
+                self.open_bytes(ctx, path, &bytes);
                 self.remember_recent(path);
-                self.tab = TAB_PROFILE;
-                Toast::new(format!("Opened {}", file_label(path)))
-                    .tone(BadgeTone::Ok)
-                    .description(format!("{people} people · {fams} families"))
-                    .show(ctx);
-                if !notes.is_empty() {
-                    Toast::new(format!("{} import note{}", notes.len(), if notes.len() == 1 { "" } else { "s" }))
-                        .tone(BadgeTone::Warning)
-                        .description(format!("{} — see the Overview tab.", notes[0]))
-                        .show(ctx);
-                }
-                self.load_notes = notes;
             }
             Err(e) => {
                 self.recent.retain(|p| p != path);
@@ -269,6 +266,62 @@ impl GenieApp {
         }
     }
 
+    fn open_bytes(&mut self, ctx: &egui::Context, path: &Path, bytes: &[u8]) {
+        let (mut doc, notes) = Document::from_bytes(bytes);
+        doc.path = Some(path.to_path_buf());
+        let (people, fams) = (doc.people().len(), doc.family_count());
+        self.set_doc(doc);
+        self.tab = TAB_PROFILE;
+        Toast::new(format!("Opened {}", file_label(path)))
+            .tone(BadgeTone::Ok)
+            .description(format!("{people} people · {fams} families"))
+            .show(ctx);
+        if !notes.is_empty() {
+            Toast::new(format!("{} import note{}", notes.len(), if notes.len() == 1 { "" } else { "s" }))
+                .tone(BadgeTone::Warning)
+                .description(format!("{} — see the Overview tab.", notes[0]))
+                .show(ctx);
+        }
+        self.load_notes = notes;
+    }
+
+    /// In the browser: (re)load the tree the server was started with.
+    fn load_from_server(&mut self, ctx: &egui::Context) {
+        self.server_load = Some(Ok(()));
+        self.server.load(ctx);
+    }
+
+    fn server_events(&mut self, ctx: &egui::Context) {
+        while let Some(event) = self.server.poll() {
+            match event {
+                ServerEvent::Loaded { path, bytes } => {
+                    self.server_load = None;
+                    self.open_bytes(ctx, &path, &bytes);
+                }
+                ServerEvent::LoadFailed(e) => {
+                    self.server_load = Some(Err(e.clone()));
+                    Toast::new("Couldn't load the tree").tone(BadgeTone::Danger).description(e).show(ctx);
+                }
+                ServerEvent::Saved(result) => {
+                    let revision = self.saving.take();
+                    match result {
+                        Ok(()) => {
+                            // Unless it was edited while saving.
+                            if let Some(doc) = self.doc.as_mut().filter(|d| Some(d.revision) == revision) {
+                                doc.dirty = false;
+                            }
+                            let name = self.doc.as_ref().map(|d| d.file_name()).unwrap_or_default();
+                            Toast::new(format!("Saved {name}")).tone(BadgeTone::Ok).show(ctx);
+                        }
+                        Err(e) => {
+                            Toast::new("Save failed").tone(BadgeTone::Danger).description(e).show(ctx);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn remember_recent(&mut self, path: &Path) {
         let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.recent.retain(|p| p != &path);
@@ -276,18 +329,22 @@ impl GenieApp {
         self.recent.truncate(MAX_RECENT);
     }
 
+    /// Saves the tree, returning whether it's done. In the browser it's
+    /// sent to the server, which answers later, so that returns false.
     fn save(&mut self, ctx: &egui::Context, force_dialog: bool) -> bool {
         let Some(doc) = self.doc.as_mut() else { return false };
+        if platform::WEB {
+            if self.saving.is_none() {
+                self.saving = Some(doc.revision);
+                self.server.save(ctx, doc.to_gedcom().into_bytes());
+            }
+            return false;
+        }
         let path = match (&doc.path, force_dialog) {
             (Some(p), false) => p.clone(),
             _ => {
-                let mut dialog = rfd::FileDialog::new()
-                    .add_filter("GEDCOM", &["ged", "GED"])
-                    .set_file_name(doc.file_name());
-                if let Some(dir) = doc.path.as_ref().and_then(|p| p.parent()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                let Some(mut p) = dialog.save_file() else { return false };
+                let dir = doc.path.as_ref().and_then(|p| p.parent());
+                let Some(mut p) = platform::save_ged(dir, &doc.file_name()) else { return false };
                 if p.extension().is_none() {
                     p.set_extension("ged");
                 }
@@ -331,12 +388,9 @@ impl GenieApp {
     fn perform(&mut self, ctx: &egui::Context, pending: Pending) {
         match pending {
             Pending::Open(Some(p)) => self.load_path(ctx, &p),
+            Pending::Open(None) if platform::WEB => self.load_from_server(ctx),
             Pending::Open(None) => {
-                let mut dialog = rfd::FileDialog::new().add_filter("GEDCOM", &["ged", "GED"]);
-                if let Some(dir) = self.recent.first().and_then(|p| p.parent()) {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(p) = dialog.pick_file() {
+                if let Some(p) = platform::pick_ged(self.recent.first().and_then(|p| p.parent())) {
                     self.load_path(ctx, &p);
                 }
             }
@@ -714,12 +768,15 @@ impl GenieApp {
                         self.media_ui.edit(doc, &m);
                     }
                 }
+                Action::PickMedia(_) | Action::AddMedia { .. } | Action::LocateMedia(_) | Action::ReplaceMediaFile(_) if platform::WEB => {
+                    platform::desktop_only(ctx, "Adding and moving files");
+                }
+                Action::FindMissingMedia if platform::WEB => platform::desktop_only(ctx, "Finding media files"),
+                Action::WikiTreePhotos if platform::WEB => platform::desktop_only(ctx, "Getting photos from WikiTree"),
+                // The browser edits the tree the server was started with.
+                Action::New | Action::Sample | Action::Close | Action::SaveAs | Action::Open(Some(_)) if platform::WEB => {}
                 Action::PickMedia(person) => {
-                    if let Some(files) = rfd::FileDialog::new()
-                        .add_filter("Images and documents", &["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "pdf", "txt", "doc", "docx"])
-                        .add_filter("All files", &["*"])
-                        .pick_files()
-                    {
+                    if let Some(files) = platform::pick_media_files() {
                         self.add_media(ctx, person, files);
                     }
                 }
@@ -734,7 +791,7 @@ impl GenieApp {
                 }
                 Action::LocateMedia(m) => {
                     let Some(doc) = self.doc.as_mut() else { continue };
-                    if let Some(found) = rfd::FileDialog::new().set_title("Where is this file now?").pick_file() {
+                    if let Some(found) = platform::pick_file(Some("Where is this file now?")) {
                         let file = match doc.path.as_deref().and_then(|t| t.parent()) {
                             Some(base) => pathdiff::diff_paths(&found, base).unwrap_or(found.clone()),
                             None => found.clone(),
@@ -746,7 +803,7 @@ impl GenieApp {
                 }
                 Action::FindMissingMedia => {
                     let Some(doc) = self.doc.as_mut() else { continue };
-                    let Some(folder) = rfd::FileDialog::new().set_title("Search this folder for files").pick_folder() else { continue };
+                    let Some(folder) = platform::pick_folder("Search this folder for files") else { continue };
                     let items = doc.media_items();
                     let wanted = items.iter().filter(|m| crate::media::needs_file(doc.path.as_deref(), m)).count();
                     let found = crate::media::find_files(doc.path.as_deref(), &items, &folder);
@@ -779,7 +836,7 @@ impl GenieApp {
                         Toast::new("Save the tree first").show(ctx);
                         continue;
                     };
-                    if let Some(src) = rfd::FileDialog::new().pick_file() {
+                    if let Some(src) = platform::pick_file(None) {
                         match crate::media::import_file(&tree, &src) {
                             Ok(rel) => {
                                 doc.mutate(|d| d.relink_media(&m, &rel));
@@ -877,9 +934,10 @@ impl GenieApp {
             None => "Genie".into(),
         };
         if title != self.title {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
+            platform::set_title(ctx, &title);
             self.title = title;
         }
+        platform::set_unsaved(self.doc.as_ref().is_some_and(|d| d.dirty));
     }
 
     fn menubar(&mut self, ui: &mut Ui) {
@@ -908,6 +966,16 @@ impl GenieApp {
         let (mut focus_search, mut shortcuts_open, mut about_open) = (false, false, false);
         bar.show(ui, |bar| {
             bar.menu("File", |ui| {
+                if platform::WEB {
+                    // The browser edits the one tree the server was started with.
+                    if ui.add(MenuItem::new("Reload").icon(glyphs::FOLDER_OPEN.to_string()).shortcut("Ctrl O")).on_hover_text("Load the tree from the server again").clicked() {
+                        acts.push(Action::Open(None));
+                    }
+                    if ui.add(MenuItem::new("Save").icon(glyphs::SAVE.to_string()).shortcut("Ctrl S").enabled(has_doc)).clicked() {
+                        acts.push(Action::Save);
+                    }
+                    return;
+                }
                 if ui.add(MenuItem::new("New tree").icon(glyphs::PLUS.to_string()).shortcut("Ctrl N")).clicked() {
                     acts.push(Action::New);
                 }
@@ -1008,6 +1076,9 @@ impl GenieApp {
                 if ui.add(MenuItem::new("Find duplicate sources…").enabled(has_doc)).clicked() {
                     acts.push(Action::FindDuplicateSources);
                 }
+                if platform::WEB {
+                    return;
+                }
                 ui.separator();
                 if ui.add(MenuItem::new("Get photos from WikiTree…").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc)).clicked() {
                     acts.push(Action::WikiTreePhotos);
@@ -1070,6 +1141,26 @@ impl GenieApp {
                     ui.label(RichText::new("Genie").size(44.0).family(crate::fonts::semibold()).color(p.focus));
                     ui.label(RichText::new("Build, explore, and share family trees — GEDCOM in, GEDCOM out.").size(16.0).color(p.text_muted));
                     ui.add_space(24.0);
+                    if platform::WEB {
+                        // The tree comes from the server.
+                        match self.server_load.clone() {
+                            Some(Err(e)) => {
+                                ui.label(RichText::new("Couldn't load the tree").size(16.0).color(p.red));
+                                widgets::muted(ui, e);
+                                ui.add_space(12.0);
+                                if ui.add(Button::new("Try again").size(ButtonSize::Large)).clicked() {
+                                    self.load_from_server(ui.ctx());
+                                }
+                            }
+                            _ => {
+                                ui.horizontal(|ui| {
+                                    ui.spinner();
+                                    widgets::muted(ui, "Loading the tree…");
+                                });
+                            }
+                        }
+                        return;
+                    }
                     let drop = FileDropZone::new()
                         .prompt("Drop a GEDCOM file here")
                         .action_word("browse")
@@ -1183,6 +1274,10 @@ impl GenieApp {
                 Some(save) => {
                     self.unsaved_open = false;
                     let ok = !save || self.save(ctx, false);
+                    if save && platform::WEB {
+                        // Saved (once the server answers): nothing to reload.
+                        self.pending = None;
+                    }
                     if ok
                         && let Some(p) = self.pending.take() {
                             if let Some(d) = self.doc.as_mut() {
@@ -1468,6 +1563,7 @@ impl eframe::App for GenieApp {
                 self.actions.push(Action::AddMedia { person, files });
             }
         }
+        self.server_events(&ctx);
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("menubar")

@@ -1,0 +1,5 @@
+# Builds the browser version of Genie into dist/, which `genie --serve`
+# embeds in release builds: run `trunk build --release` before `cargo build --release`.
+[build]
+target = "index.html"
+dist = "dist"

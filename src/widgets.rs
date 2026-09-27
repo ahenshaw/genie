@@ -35,7 +35,7 @@ pub fn tree_path(ctx: &egui::Context) -> Option<std::path::PathBuf> {
 /// An image URI for a GEDCOM media path, if the file exists.
 pub fn media_uri(ctx: &egui::Context, file: &str) -> Option<String> {
     let path = crate::media::resolve(tree_path(ctx).as_deref(), file)?;
-    path.is_file().then(|| format!("file://{}", path.display()))
+    crate::platform::exists(&path).then(|| crate::platform::image_uri(&path))
 }
 
 /// Paints an image cropped to fill `rect` (like CSS `object-fit: cover`).

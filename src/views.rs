@@ -28,8 +28,8 @@ pub fn app_people(ctx: &egui::Context) -> (Option<String>, Option<String>) {
 }
 
 pub fn current_year() -> i32 {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+    let secs = web_time::SystemTime::now()
+        .duration_since(web_time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     1970 + (secs / 31_556_952) as i32

@@ -189,7 +189,7 @@ impl ToolsUi {
                                 ui.horizontal(|ui| {
                                     ui.checkbox(&mut checked[i], "");
                                     let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
-                                    let uri = format!("file://{}", ph.file.display());
+                                    let uri = crate::platform::image_uri(&ph.file);
                                     if !crate::widgets::paint_cover(ui, &uri, r, 6) {
                                         ui.painter().rect_filled(r, 6, p.input_bg);
                                     }
@@ -211,7 +211,7 @@ impl ToolsUi {
                                             ui.label(RichText::new(format!("{kind} · {}×{}", ph.width, ph.height)).size(12.0).color(p.text_faint));
                                             let link = ui.add(egui::Label::new(RichText::new(format!("WikiTree {}", ph.profile)).size(12.0).color(p.focus).underline()).sense(Sense::click()));
                                             if link.on_hover_text(&ph.page_url).clicked() {
-                                                let _ = open::that_detached(&ph.page_url);
+                                                crate::platform::open_url(ui.ctx(), &ph.page_url);
                                             }
                                             if ph.looks_like_badge() {
                                                 ui.add(Badge::new("Small — may be a badge", BadgeTone::Warning).preserve_case());

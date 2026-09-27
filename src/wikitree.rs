@@ -7,12 +7,16 @@
 //!
 //! WikiTree asks API users to identify their app (`appId`) and to go easy
 //! on the servers, so requests are spaced out.
+//!
+//! The browser build has no search (see `start`), only the matching.
+#![cfg_attr(target_arch = "wasm32", allow(dead_code, unused_imports))]
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
+#[cfg(not(target_arch = "wasm32"))]
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -26,6 +30,7 @@ const SITE: &str = "https://www.wikitree.com";
 const APP_ID: &str = "Genie";
 const USER_AGENT: &str = "Genie genealogy app (https://github.com/ahenshaw/genie)";
 /// Minimum gap between requests.
+#[cfg(not(target_arch = "wasm32"))]
 const SPACING: Duration = Duration::from_millis(1200);
 const ANCESTORS: &str = "12";
 const DESCENDANTS: &str = "5";
@@ -242,11 +247,13 @@ pub fn imported_pages(doc: &Document) -> HashSet<String> {
 
 // ---- the search, on a background thread -------------------------------------------------------
 
+#[cfg(not(target_arch = "wasm32"))]
 struct Client {
     agent: ureq::Agent,
     last: Option<Instant>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl Client {
     fn new() -> Self {
         let agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
@@ -293,6 +300,7 @@ impl Client {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn describe(e: &ureq::Error) -> String {
     match e {
         ureq::Error::StatusCode(429) => "WikiTree is limiting requests right now; try again in a while.".into(),
@@ -303,6 +311,7 @@ fn describe(e: &ureq::Error) -> String {
 
 /// Starts a search. Progress arrives on the returned channel, ending with
 /// `Progress::Done`. Setting `cancel` stops it between requests.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn start(starts: Vec<String>, people: Vec<TreePerson>, skip_pages: HashSet<String>, download_to: PathBuf, cancel: Arc<AtomicBool>) -> Receiver<Progress> {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -312,6 +321,16 @@ pub fn start(starts: Vec<String>, people: Vec<TreePerson>, skip_pages: HashSet<S
     rx
 }
 
+/// The browser can't call WikiTree (it doesn't allow other sites to), and
+/// the photos would need copying into the server's media folder.
+#[cfg(target_arch = "wasm32")]
+pub fn start(_starts: Vec<String>, _people: Vec<TreePerson>, _skip_pages: HashSet<String>, _download_to: PathBuf, _cancel: Arc<AtomicBool>) -> Receiver<Progress> {
+    let (tx, rx) = channel();
+    let _ = tx.send(Progress::Done(Err("Getting photos from WikiTree is only available in the desktop app.".into())));
+    rx
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn run(starts: &[String], people: &[TreePerson], skip_pages: &HashSet<String>, download_to: &Path, cancel: &AtomicBool, tx: &Sender<Progress>) -> Result<Report, String> {
     let stopped = || if cancel.load(Ordering::Relaxed) { Err("Cancelled.".to_string()) } else { Ok(()) };
     let say = |s: String| {

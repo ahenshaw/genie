@@ -27,6 +27,20 @@ To open a file directly:
 cargo run --release -- path/to/family.ged
 ```
 
+## Use it in a web browser
+
+Genie can also run as a small local web server and show the same app in a browser tab. The browser version is built with [trunk](https://trunkrs.dev) and embedded in the Genie executable:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install trunk
+trunk build --release        # builds the browser app into dist/
+cargo build --release        # embeds dist/ into Genie
+./target/release/genie --serve path/to/family.ged
+```
+
+This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser` not to open one). Saving in the browser writes back to that `.ged` file, and photos and documents are fetched from the server. The server only listens on this computer (localhost) and has no login. The browser can't reach files on disk, so adding or relinking media files, *Find media files…* and *Get photos from WikiTree…* stay in the desktop app. Stop the server with Ctrl+C.
+
 ## Getting started
 
 - **Open a file:** File → Open… (Ctrl+O), or drag a `.ged` file onto the window.
