@@ -36,6 +36,7 @@ cargo run --release -- path/to/family.ged
 - **See how two people are related:** right-click someone and choose *Relationship to …*, or open the Relationship section and pick both people.
 - **Add documents and photos:** drop files onto the window to attach them to the selected person, or use *Add* on their profile. Files are copied into a `<tree name> media` folder next to the tree file. Save a new tree before adding documents.
 - **Clean up an imported tree:** *Tools → Find duplicate people…* lists people who may have been entered twice and lets you compare and merge them; *Find duplicate sources…* merges repeated sources.
+- **Get photos from WikiTree:** *Tools → Get photos from WikiTree…* asks for a WikiTree ID (for example `Henshaw-1012`), matches the WikiTree profiles around it to people in your tree, and lets you pick which photos to add. The photos are copied into the media folder and linked to each person.
 - **Set a home person:** right-click someone and choose *Set as home person*. Each profile then shows how that person is related to them.
 - **Save:** Ctrl+S, or Ctrl+Shift+S to save as a new file.
 

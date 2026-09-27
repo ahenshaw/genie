@@ -61,6 +61,7 @@ pub enum Action {
     FindMissingMedia,
     FindDuplicatePeople,
     FindDuplicateSources,
+    WikiTreePhotos,
     /// A merge removed a person; move the selection to who they became.
     MergedPerson { kept: String, removed: String },
     Open(Option<PathBuf>),
@@ -789,6 +790,11 @@ impl GenieApp {
                         self.tools.open_people(doc, &dismissed);
                     }
                 }
+                Action::WikiTreePhotos => {
+                    if let Some(doc) = &self.doc {
+                        self.tools.open_wikitree(doc);
+                    }
+                }
                 Action::FindDuplicateSources => {
                     if let Some(doc) = &self.doc {
                         self.tools.open_sources(doc);
@@ -997,6 +1003,9 @@ impl GenieApp {
                     acts.push(Action::FindDuplicateSources);
                 }
                 ui.separator();
+                if ui.add(MenuItem::new("Get photos from WikiTree…").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc)).clicked() {
+                    acts.push(Action::WikiTreePhotos);
+                }
                 if ui.add(MenuItem::new("Find media files…").icon(glyphs::FOLDER_OPEN.to_string()).enabled(has_doc)).on_hover_text("Search a folder for missing files, and for files belonging to records that have none").clicked() {
                     acts.push(Action::FindMissingMedia);
                 }

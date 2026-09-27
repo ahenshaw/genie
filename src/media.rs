@@ -543,12 +543,7 @@ pub fn add_files(doc: &mut Document, tree: &Path, files: &[PathBuf], person: Opt
                     d.attach_media(&m, p, &MediaPlace::Whole);
                     // Take over as profile photo unless the current one can be shown
                     // (an imported tree may mark one whose file never came with it).
-                    let current_shows = d
-                        .primary_media(p)
-                        .and_then(|cur| d.media_item(&cur))
-                        .and_then(|it| resolve(Some(tree), &it.file))
-                        .is_some_and(|f| f.is_file());
-                    if kind == "photo" && !current_shows {
+                    if kind == "photo" && !primary_shows(d, p, tree) {
                         d.set_primary_photo(p, &m);
                     }
                 }
@@ -557,6 +552,14 @@ pub fn add_files(doc: &mut Document, tree: &Path, files: &[PathBuf], person: Opt
             .collect()
     });
     (created, failed)
+}
+
+/// Whether the person's profile photo has a file that can be shown.
+pub fn primary_shows(d: &Document, person: &str, tree: &Path) -> bool {
+    d.primary_media(person)
+        .and_then(|cur| d.media_item(&cur))
+        .and_then(|it| resolve(Some(tree), &it.file))
+        .is_some_and(|f| f.is_file())
 }
 
 /// A sensible kind for a new file, from its name.

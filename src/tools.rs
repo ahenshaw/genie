@@ -6,7 +6,12 @@ use std::collections::{HashMap, HashSet};
 use egui::{Align, Layout, RichText, Sense, Stroke, Ui, vec2};
 use elegance::{Accent, Badge, BadgeTone, Button, ButtonSize, Modal, Theme, Toast, glyphs};
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::Receiver;
+
 use crate::app::Action;
+use crate::wikitree::{self, Progress, Report};
 use crate::dedup::{self, Candidate, MergeChoices, Side};
 use crate::model::Document;
 use crate::widgets::{mix, muted, paint_avatar, section_label};
@@ -18,6 +23,22 @@ const MAP_H: f32 = 190.0;
 pub struct ToolsUi {
     people: Option<PeopleDupes>,
     sources: Option<SourceDupes>,
+    wikitree: Option<WikiTreeDialog>,
+}
+
+struct WikiTreeDialog {
+    open: bool,
+    /// WikiTree IDs to start from, comma-separated.
+    start: String,
+    suggestions: Vec<(String, String)>,
+    stage: WtStage,
+}
+
+enum WtStage {
+    Setup,
+    Running { rx: Receiver<Progress>, cancel: Arc<AtomicBool>, status: String, done: usize, total: usize },
+    Review { report: Report, checked: Vec<bool> },
+    Failed(String),
 }
 
 struct PeopleDupes {
@@ -49,9 +70,207 @@ impl ToolsUi {
         self.sources = Some(SourceDupes { open: true, groups: dedup::find_duplicate_sources(doc) });
     }
 
+    pub fn open_wikitree(&mut self, doc: &Document) {
+        let suggestions = wikitree::suggested_starts(doc);
+        let start = suggestions.iter().take(5).map(|(id, _)| id.clone()).collect::<Vec<_>>().join(", ");
+        self.wikitree = Some(WikiTreeDialog { open: true, start, suggestions, stage: WtStage::Setup });
+    }
+
     pub fn overlays(&mut self, ctx: &egui::Context, doc: &mut Document, dismissed: &mut HashSet<String>, actions: &mut Vec<Action>) {
         self.people_dialog(ctx, doc, dismissed, actions);
         self.sources_dialog(ctx, doc);
+        self.wikitree_dialog(ctx, doc, actions);
+    }
+
+    fn wikitree_dialog(&mut self, ctx: &egui::Context, doc: &mut Document, actions: &mut Vec<Action>) {
+        let Some(st) = self.wikitree.as_mut() else { return };
+        let p = Theme::current(ctx).palette;
+
+        // Collect progress from the search thread.
+        let mut finished = None;
+        if let WtStage::Running { rx, status, done, total, .. } = &mut st.stage {
+            while let Ok(msg) = rx.try_recv() {
+                match msg {
+                    Progress::Status(s) => *status = s,
+                    Progress::Count { done: d, total: t } => (*done, *total) = (d, t),
+                    Progress::Done(r) => finished = Some(r),
+                }
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
+        }
+        match finished {
+            Some(Ok(report)) => {
+                let checked = report.photos.iter().map(|ph| !ph.looks_like_badge()).collect();
+                st.stage = WtStage::Review { report, checked };
+            }
+            Some(Err(e)) if e == "Cancelled." => st.stage = WtStage::Setup,
+            Some(Err(e)) => st.stage = WtStage::Failed(e),
+            None => {}
+        }
+
+        let mut search = false;
+        let mut cancel_search = false;
+        let mut add = false;
+        let mut close = false;
+        let tree = doc.path.clone();
+        Modal::new("wikitree_photos", &mut st.open)
+            .heading("Get photos from WikiTree")
+            .subtitle("Photos from wikitree.com for people in your tree")
+            .max_width(760.0)
+            .show(ctx, |ui| {
+                ui.spacing_mut().item_spacing.y = 8.0;
+                match &mut st.stage {
+                    WtStage::Setup => {
+                        muted(ui, "Start from the WikiTree profile of someone in your tree. Genie fetches their relatives from WikiTree (up to 12 generations back and 5 down), matches them to your tree by name and dates, and shows the photos it finds for you to choose from. Nothing changes until you add them.");
+                        if tree.is_none() {
+                            elegance::Callout::new(elegance::CalloutTone::Warning).title("Save the tree first: photos are copied into a media folder next to it.").show(ui, |_| {});
+                        }
+                        ui.add(elegance::TextInput::new(&mut st.start).label("WikiTree IDs to start from").hint("e.g. Henshaw-1012 — separate several with commas").id_salt("wt_start"));
+                        if !st.suggestions.is_empty() {
+                            ui.label(RichText::new("Found in your tree:").size(12.0).color(p.text_muted));
+                            ui.horizontal_wrapped(|ui| {
+                                for (id, who) in &st.suggestions {
+                                    let r = ui.add(egui::Button::new(RichText::new(format!("{id} · {who}")).size(12.5)).corner_radius(12));
+                                    if r.clicked() && !st.start.split(',').any(|s| s.trim() == id) {
+                                        if !st.start.trim().is_empty() {
+                                            st.start.push_str(", ");
+                                        }
+                                        st.start.push_str(id);
+                                    }
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            let ok = tree.is_some() && !st.start.trim().is_empty();
+                            if ui.add(Button::new(format!("{}  Search WikiTree", glyphs::SEARCH)).accent(Accent::Green).enabled(ok)).clicked() {
+                                search = true;
+                            }
+                            ui.label(RichText::new("Requests are spaced out, as WikiTree asks; a large family takes a minute or two.").size(12.0).color(p.text_faint));
+                        });
+                    }
+                    WtStage::Running { status, done, total, .. } => {
+                        ui.horizontal(|ui| {
+                            ui.add(elegance::Spinner::new().size(18.0));
+                            ui.label(RichText::new(status.as_str()).size(14.0));
+                        });
+                        if *total > 0 {
+                            ui.add(elegance::ProgressBar::new(*done as f32 / *total as f32).text(format!("{done} of {total}")));
+                        }
+                        if ui.add(Button::new("Cancel").outline()).clicked() {
+                            cancel_search = true;
+                        }
+                    }
+                    WtStage::Failed(e) => {
+                        elegance::Callout::new(elegance::CalloutTone::Danger).title(e.clone()).show(ui, |_| {});
+                        if ui.add(Button::new("Back").outline()).clicked() {
+                            st.stage = WtStage::Setup;
+                        }
+                    }
+                    WtStage::Review { report, checked } => {
+                        let people: HashSet<&str> = report.photos.iter().map(|ph| ph.xref.as_str()).collect();
+                        let mut line = format!(
+                            "{} of {} WikiTree profiles matched people in your tree · {} new photo{} for {} {}",
+                            report.matched.len(),
+                            report.profiles,
+                            report.photos.len(),
+                            if report.photos.len() == 1 { "" } else { "s" },
+                            people.len(),
+                            if people.len() == 1 { "person" } else { "people" }
+                        );
+                        if report.already > 0 {
+                            line.push_str(&format!(" · {} already imported", report.already));
+                        }
+                        muted(ui, line);
+                        if report.photos.is_empty() {
+                            muted(ui, "No new photos. Try starting from someone in another branch of the family.");
+                        }
+                        egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+                            for (i, ph) in report.photos.iter().enumerate() {
+                                ui.horizontal(|ui| {
+                                    ui.checkbox(&mut checked[i], "");
+                                    let (r, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+                                    let uri = format!("file://{}", ph.file.display());
+                                    if !crate::widgets::paint_cover(ui, &uri, r, 6) {
+                                        ui.painter().rect_filled(r, 6, p.input_bg);
+                                    }
+                                    ui.vertical(|ui| {
+                                        ui.spacing_mut().item_spacing.y = 1.0;
+                                        ui.label(RichText::new(&ph.title).size(14.0).color(p.text));
+                                        let who = doc.person(&ph.xref).map(|q| format!("{}  {}", q.display, q.lifespan())).unwrap_or_default();
+                                        let theirs = report.matched.get(&ph.xref).map(|m| {
+                                            let years = match (m.birth, m.death) {
+                                                (Some(b), Some(d)) => format!("{b} – {d}"),
+                                                (Some(b), None) => format!("b. {b}"),
+                                                _ => String::new(),
+                                            };
+                                            format!("{} {years}", m.display)
+                                        });
+                                        ui.label(RichText::new(format!("For {who}  ↔  WikiTree: {}", theirs.unwrap_or_default())).size(12.5).color(p.text_muted));
+                                        ui.horizontal(|ui| {
+                                            let kind = if ph.kind == "photo" { "Photo".to_string() } else { format!("{} (added as a document)", ph.kind) };
+                                            ui.label(RichText::new(format!("{kind} · {}×{}", ph.width, ph.height)).size(12.0).color(p.text_faint));
+                                            let link = ui.add(egui::Label::new(RichText::new(format!("WikiTree {}", ph.profile)).size(12.0).color(p.focus).underline()).sense(Sense::click()));
+                                            if link.on_hover_text(&ph.page_url).clicked() {
+                                                let _ = open::that_detached(&ph.page_url);
+                                            }
+                                            if ph.looks_like_badge() {
+                                                ui.add(Badge::new("Small — may be a badge", BadgeTone::Warning).preserve_case());
+                                            }
+                                        });
+                                    });
+                                });
+                                ui.add_space(4.0);
+                            }
+                        });
+                        let n = checked.iter().filter(|c| **c).count();
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui.add(Button::new(format!("Add {n} photo{}", if n == 1 { "" } else { "s" })).accent(Accent::Green).enabled(n > 0)).clicked() {
+                                add = true;
+                            }
+                            if ui.add(Button::new("Close").outline()).clicked() {
+                                close = true;
+                            }
+                            ui.label(RichText::new("WikiTree photos are shared by its members and may be copyrighted.").size(11.5).color(p.text_faint));
+                        });
+                    }
+                }
+            });
+
+        if search {
+            let starts: Vec<String> = st.start.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let rx = wikitree::start(starts, wikitree::tree_people(doc), wikitree::imported_pages(doc), std::env::temp_dir().join("genie-wikitree"), cancel.clone());
+            st.stage = WtStage::Running { rx, cancel, status: "Contacting WikiTree…".into(), done: 0, total: 0 };
+        }
+        if cancel_search && let WtStage::Running { cancel, status, .. } = &mut st.stage {
+            cancel.store(true, Ordering::Relaxed);
+            *status = "Stopping…".into();
+        }
+        if add
+            && let (WtStage::Review { report, checked }, Some(tree)) = (&st.stage, &tree)
+        {
+            let chosen: Vec<&wikitree::FoundPhoto> = report.photos.iter().zip(checked).filter(|(_, c)| **c).map(|(ph, _)| ph).collect();
+            let (n, failed) = wikitree::import(doc, tree, &chosen);
+            for f in failed {
+                Toast::new("Couldn't add a photo").tone(BadgeTone::Danger).description(f).show(ctx);
+            }
+            if n > 0 {
+                Toast::new(format!("Added {n} photo{} from WikiTree", if n == 1 { "" } else { "s" })).tone(BadgeTone::Ok).description("Undo with Ctrl+Z.").show(ctx);
+                if let Some(first) = chosen.first() {
+                    actions.push(Action::Select(first.xref.clone()));
+                }
+            }
+            close = true;
+        }
+        // Closing mid-search stops it.
+        if (close || !st.open)
+            && let WtStage::Running { cancel, .. } = &st.stage
+        {
+            cancel.store(true, Ordering::Relaxed);
+        }
+        if close || !st.open {
+            self.wikitree = None;
+        }
     }
 
     fn people_dialog(&mut self, ctx: &egui::Context, doc: &mut Document, dismissed: &mut HashSet<String>, actions: &mut Vec<Action>) {

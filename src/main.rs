@@ -16,6 +16,7 @@ mod tools;
 mod tree;
 mod views;
 mod widgets;
+mod wikitree;
 
 fn main() -> eframe::Result {
     let open = std::env::args_os().nth(1).map(std::path::PathBuf::from);

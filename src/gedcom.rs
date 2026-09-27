@@ -318,7 +318,7 @@ mod tests {
     fn long_values_use_conc() {
         let long = "word ".repeat(100);
         let n = Node::new("NOTE", long.trim_end());
-        let text = write(&[n.clone()]);
+        let text = write(std::slice::from_ref(&n));
         assert!(text.contains("CONC"));
         let (back, _) = parse(&text);
         assert_eq!(back[0].value, n.value);
