@@ -47,6 +47,9 @@ impl Sex {
 #[derive(Clone, Debug)]
 pub struct PersonSummary {
     pub xref: String,
+    /// Image files attached to the person (as written in the GEDCOM),
+    /// their profile photo first. Avatars use the first that exists.
+    pub photos: Vec<String>,
     pub given: String,
     pub surname: String,
     pub display: String,
@@ -145,6 +148,15 @@ pub struct CitationForm {
 }
 
 impl CitationForm {
+    /// Documents attached to this citation.
+    pub fn media(&self) -> Vec<String> {
+        self.original
+            .iter()
+            .flat_map(|n| n.children_with("OBJE"))
+            .filter_map(|o| o.pointer().map(str::to_string))
+            .collect()
+    }
+
     pub fn new(fact: FactKey, source: CiteSource) -> Self {
         Self { fact, source, page: String::new(), quality: None, original: None }
     }
@@ -153,6 +165,8 @@ impl CitationForm {
 /// A citation as shown on the profile.
 #[derive(Clone, Debug)]
 pub struct CitationView {
+    /// Documents attached to the citation (scans of the record).
+    pub media: Vec<String>,
     pub fact: String,
     pub title: String,
     pub author: String,
@@ -255,7 +269,7 @@ impl Document {
 
     // ---- caches -------------------------------------------------------------
 
-    fn rebuild(&mut self) {
+    pub(crate) fn rebuild(&mut self) {
         self.index.clear();
         for (i, r) in self.records.iter().enumerate() {
             if let Some(x) = &r.xref {
@@ -272,6 +286,9 @@ impl Document {
             (a.surname.to_lowercase(), a.given.to_lowercase(), a.birth_year)
                 .cmp(&(b.surname.to_lowercase(), b.given.to_lowercase(), b.birth_year))
         });
+        for person in &mut people {
+            person.photos = self.photo_files(&person.xref);
+        }
         self.person_pos = people.iter().enumerate().map(|(i, p)| (p.xref.clone(), i)).collect();
         self.people = people;
         self.revision += 1;
@@ -342,17 +359,29 @@ impl Document {
         self.person_pos.get(xref).map(|&i| &self.people[i])
     }
 
+    /// Whether `xref` is an individual. Reads the records rather than the
+    /// summary cache, so it also holds mid-edit for people just created.
+    fn is_person(&self, xref: &str) -> bool {
+        self.record(xref).is_some_and(|r| r.tag == "INDI")
+    }
+
     pub fn record(&self, xref: &str) -> Option<&Node> {
         self.index.get(xref).map(|&i| &self.records[i])
     }
 
-    fn record_mut(&mut self, xref: &str) -> Option<&mut Node> {
+    pub(crate) fn record_mut(&mut self, xref: &str) -> Option<&mut Node> {
         let i = *self.index.get(xref)?;
         Some(&mut self.records[i])
     }
 
     pub fn records(&self) -> &[Node] {
         &self.records
+    }
+
+    /// Direct access for bulk edits (merges); call inside `mutate`, which
+    /// rebuilds the indexes afterwards.
+    pub(crate) fn records_mut(&mut self) -> &mut Vec<Node> {
+        &mut self.records
     }
 
     pub fn family_count(&self) -> usize {
@@ -384,18 +413,18 @@ impl Document {
     }
 
     pub fn husband(&self, fam: &str) -> Option<String> {
-        self.pointers(fam, "HUSB").into_iter().find(|x| self.person(x).is_some())
+        self.pointers(fam, "HUSB").into_iter().find(|x| self.is_person(x))
     }
 
     pub fn wife(&self, fam: &str) -> Option<String> {
-        self.pointers(fam, "WIFE").into_iter().find(|x| self.person(x).is_some())
+        self.pointers(fam, "WIFE").into_iter().find(|x| self.is_person(x))
     }
 
     pub fn children(&self, fam: &str) -> Vec<String> {
         let mut kids: Vec<String> = self
             .pointers(fam, "CHIL")
             .into_iter()
-            .filter(|x| self.person(x).is_some())
+            .filter(|x| self.is_person(x))
             .collect();
         // Stable sort by birth year; unknown years keep file order at the end.
         kids.sort_by_key(|k| self.person(k).and_then(|p| p.birth_year).unwrap_or(i32::MAX));
@@ -520,7 +549,7 @@ impl Document {
             CiteSource::New { title, author, .. } => (title.clone(), author.clone()),
             CiteSource::Text(t) => (t.clone(), String::new()),
         };
-        CitationView { fact, title, author, page: c.page.clone(), quality: c.quality }
+        CitationView { media: c.media(), fact, title, author, page: c.page.clone(), quality: c.quality }
     }
 
     pub fn timeline(&self, xref: &str) -> Vec<EventView> {
@@ -647,7 +676,7 @@ impl Document {
 
     // ---- editing (call inside `mutate`) --------------------------------------
 
-    fn next_xref(&self, prefix: &str) -> String {
+    pub(crate) fn next_xref(&self, prefix: &str) -> String {
         let max = self
             .index
             .keys()
@@ -657,7 +686,7 @@ impl Document {
         format!("{prefix}{}", max + 1)
     }
 
-    fn push_record(&mut self, node: Node) -> String {
+    pub(crate) fn push_record(&mut self, node: Node) -> String {
         let xref = node.xref.clone().expect("record needs xref");
         self.index.insert(xref.clone(), self.records.len());
         self.records.push(node);
@@ -682,9 +711,14 @@ impl Document {
                 CiteSource::Text(_) => None,
             })
             .collect();
+        // Citations are only rewritten when they've changed, so an unchanged
+        // save leaves them exactly where they were.
+        let citations_changed = self.record(xref).is_none_or(|r| read_citations(r) != form.citations);
         let Some(r) = self.record_mut(xref) else { return };
-        strip_citations(r);
         let original_order = fact_keys(r);
+        if citations_changed {
+            strip_citations(r);
+        }
         let given = form.given.trim();
         let surname = form.surname.trim();
         let name_unchanged = r.child("NAME").is_some_and(|n| {
@@ -723,8 +757,10 @@ impl Document {
             None if !note.is_empty() => r.children.push(Node::new("NOTE", note)),
             None => {}
         }
-        for (c, pointer) in form.citations.iter().zip(pointers) {
-            write_citation(r, c, pointer);
+        if citations_changed {
+            for (c, pointer) in form.citations.iter().zip(pointers) {
+                write_citation(r, c, pointer);
+            }
         }
         // Lines that were already there keep their place; new ones go where
         // GEDCOM convention puts them (names first, family links last).
@@ -902,6 +938,58 @@ impl Document {
         self.set_spouse_role(fam, person)
     }
 
+    /// The family whose partners are exactly `husband` and `wife`.
+    pub fn find_family(&self, husband: Option<&str>, wife: Option<&str>) -> Option<String> {
+        let anchor = husband.or(wife)?;
+        self.spouse_families(anchor)
+            .into_iter()
+            .find(|f| self.husband(f).as_deref() == husband && self.wife(f).as_deref() == wife)
+    }
+
+    /// Makes `father` and `mother` the parents of `child` (their first birth
+    /// family): reuses a family with exactly those partners, else creates
+    /// one, and tidies away a family the child leaves empty. Other birth
+    /// families (adoptive, say) are left alone.
+    pub fn set_parents(&mut self, child: &str, father: Option<&str>, mother: Option<&str>) {
+        let current = self.parent_families(child).into_iter().next();
+        if let Some(f) = &current
+            && self.husband(f).as_deref() == father
+            && self.wife(f).as_deref() == mother
+        {
+            return;
+        }
+        // Where the old birth family sat, so the new one takes its place.
+        let slot = self.record(child).and_then(|r| r.children.iter().position(|c| c.tag == "FAMC"));
+        if let Some(f) = &current {
+            self.detach(f, child);
+            self.drop_family_if_empty(f);
+        }
+        if father.is_none() && mother.is_none() {
+            return;
+        }
+        let fam = match self.find_family(father, mother) {
+            Some(f) => f,
+            None => {
+                let f = self.create_family();
+                for (tag, who) in [("HUSB", father), ("WIFE", mother)] {
+                    if let Some(p) = who {
+                        self.add_pointer(&f, tag, p);
+                        self.add_pointer(p, "FAMS", &f);
+                    }
+                }
+                f
+            }
+        };
+        self.add_child_to(&fam, child);
+        let p = pointer_to(&fam);
+        if let (Some(slot), Some(r)) = (slot, self.record_mut(child))
+            && let Some(i) = r.children.iter().position(|c| c.tag == "FAMC" && c.value == p)
+        {
+            let node = r.children.remove(i);
+            r.children.insert(slot.min(r.children.len()), node);
+        }
+    }
+
     pub fn add_child_to(&mut self, fam: &str, person: &str) {
         self.add_pointer(fam, "CHIL", person);
         self.add_pointer(person, "FAMC", fam);
@@ -909,6 +997,11 @@ impl Document {
 
     pub fn delete_family(&mut self, fam: &str) {
         self.remove_record(fam);
+    }
+
+    /// Removes a record of any kind and every pointer to it.
+    pub(crate) fn delete_record(&mut self, xref: &str) {
+        self.remove_record(xref);
     }
 
     pub fn set_family_event(&mut self, fam: &str, tag: &str, date: &str, place: &str) {
@@ -974,7 +1067,7 @@ impl Document {
 
 fn strip_pointers(n: &mut Node, p: &str) {
     n.children.retain(|c| {
-        !(c.value == p && matches!(c.tag.as_str(), "HUSB" | "WIFE" | "CHIL" | "FAMS" | "FAMC" | "ASSO" | "ALIA"))
+        !(c.value == p && matches!(c.tag.as_str(), "HUSB" | "WIFE" | "CHIL" | "FAMS" | "FAMC" | "ASSO" | "ALIA" | "OBJE"))
     });
     for c in &mut n.children {
         strip_pointers(c, p);
@@ -1025,7 +1118,7 @@ fn source_title(r: &Node, xref: &str) -> String {
 
 /// Tags whose `SOUR` children the editor manages: the person as a whole,
 /// their names, and their events.
-fn is_citable(tag: &str) -> bool {
+pub(crate) fn is_citable(tag: &str) -> bool {
     tag == "NAME" || event_label(tag).is_some()
 }
 
@@ -1139,6 +1232,7 @@ fn summarize(r: &Node) -> PersonSummary {
     let search = format!("{display} {xref} {}", birth_year.map(|y| y.to_string()).unwrap_or_default()).to_lowercase();
     PersonSummary {
         xref,
+        photos: Vec::new(),
         given,
         surname,
         display,
@@ -1453,6 +1547,61 @@ mod tests {
             let _ = doc.timeline(&p.xref);
         }
         println!("200 timelines in {:?}", t.elapsed());
+        let t = std::time::Instant::now();
+        let people = doc.people();
+        let mut connected = 0;
+        for p in people.iter().step_by((people.len() / 50).max(1)).take(50) {
+            if !crate::kinship::find(&doc, &people[0].xref, &p.xref).is_empty() {
+                connected += 1;
+            }
+        }
+        println!("50 relationship searches in {:?} ({connected} connected)", t.elapsed());
+        let t = std::time::Instant::now();
+        let dupes = crate::dedup::find_duplicate_people(&doc, &Default::default());
+        let likely = dupes.iter().filter(|c| c.likely()).count();
+        println!("{} possible duplicate people ({likely} likely) in {:?}", dupes.len(), t.elapsed());
+        for c in dupes.iter().take(8) {
+            let n = |x: &str| doc.person(x).map(|p| format!("{} {}", p.display, p.lifespan())).unwrap_or_default();
+            println!("  {:>3}  {}  <>  {}   [{}]", c.score, n(&c.a), n(&c.b), c.reasons.join(", "));
+        }
+        let groups = crate::dedup::find_duplicate_sources(&doc);
+        println!("{} groups of duplicate sources ({} extra copies)", groups.len(), groups.iter().map(|g| g.len() - 1).sum::<usize>());
+
+        // Merge every duplicate source and the likely people; nothing may be
+        // left pointing at a record that no longer exists.
+        let mut merged = Document::from_bytes(once.as_bytes()).0;
+        merged.mutate(|d| {
+            for g in &groups {
+                for other in &g[1..] {
+                    d.merge_records(&g[0], other);
+                }
+            }
+        });
+        let mut n = 0;
+        for c in dupes.iter().filter(|c| c.likely()) {
+            if merged.person(&c.a).is_some() && merged.person(&c.b).is_some() {
+                merged.mutate(|d| d.merge_people(&c.a, &c.b, Default::default()));
+                n += 1;
+            }
+        }
+        let text = merged.to_gedcom();
+        let (reloaded, _) = Document::from_bytes(text.as_bytes());
+        let mut dangling = Vec::new();
+        fn walk(doc: &Document, n: &Node, out: &mut Vec<String>) {
+            for c in &n.children {
+                if let Some(x) = c.pointer()
+                    && doc.record(x).is_none()
+                {
+                    out.push(format!("{} {}", c.tag, c.value));
+                }
+                walk(doc, c, out);
+            }
+        }
+        for r in reloaded.records() {
+            walk(&reloaded, r, &mut dangling);
+        }
+        println!("merged {n} likely pairs and {} source groups: {} people left, {} dangling references", groups.len(), reloaded.people().len(), dangling.len());
+        assert!(dangling.is_empty(), "dangling after merges: {:?}", &dangling[..dangling.len().min(10)]);
         // Re-applying every unchanged form must not alter the file.
         let mut edited = Document::from_bytes(once.as_bytes()).0;
         let xrefs: Vec<String> = edited.people().iter().take(500).map(|p| p.xref.clone()).collect();

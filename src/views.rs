@@ -6,15 +6,26 @@ use std::sync::Arc;
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Ui, pos2, vec2};
 use elegance::{
     Accent, Avatar, AvatarSize, Badge, BadgeTone, Button, ButtonSize, Card, ContextMenu, Menu, MenuItem,
-    ProgressBar, SegmentedControl, SegmentedSize, StatCard, TextInput, Theme, glyphs,
+    ProgressBar, SegmentedControl, SegmentedSize, StatCard, Theme, glyphs,
 };
 
-use crate::app::{Action, TAB_GRAPH, TAB_TREE};
+use crate::app::{Action, TAB_GRAPH, TAB_RELATION, TAB_TREE};
 use crate::gedcom;
 use crate::model::{Document, Relation, Sex};
 use crate::widgets::{add_chip, fit_text, mix, muted, paint_avatar, person_chip, section_label, sex_tone};
 
 const ROW_H: f32 = 50.0;
+
+/// The selected and home person, published by the app each frame so menus
+/// anywhere can offer relationships to them.
+pub fn app_people(ctx: &egui::Context) -> (Option<String>, Option<String>) {
+    ctx.data(|d| {
+        (
+            d.get_temp::<Option<String>>(egui::Id::new("genie_selected")).flatten(),
+            d.get_temp::<Option<String>>(egui::Id::new("genie_home")).flatten(),
+        )
+    })
+}
 
 pub fn current_year() -> i32 {
     let secs = std::time::SystemTime::now()
@@ -37,17 +48,14 @@ pub fn people_panel(
 ) {
     let p = Theme::current(ui.ctx()).palette;
     let people = doc.people();
+    let home = app_people(ui.ctx()).1;
     ui.horizontal(|ui| {
         ui.label(RichText::new("People").size(16.0).strong().color(p.text));
         ui.add(Badge::new(people.len().to_string(), BadgeTone::Neutral));
     });
     ui.add_space(6.0);
-    let resp = ui.add(
-        TextInput::new(search)
-            .hint("Search name, year or ID…")
-            .id_salt("people_search")
-            .desired_width(ui.available_width()),
-    );
+    let width = ui.available_width();
+    let resp = crate::widgets::search_input(ui, search, "Search name, year or ID…", "people_search", Some(width));
     if *focus_search {
         resp.request_focus();
         *focus_search = false;
@@ -162,6 +170,9 @@ pub fn people_panel(
             if !life.is_empty() {
                 painter.text(pos2(x, rect.top() + 34.0), Align2::LEFT_CENTER, life, FontId::proportional(12.0), p.text_faint);
             }
+            if home.as_deref() == Some(person.xref.as_str()) {
+                painter.text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, glyphs::HOME.to_string(), FontId::proportional(15.0), p.focus);
+            }
             let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
             if resp.clicked() {
                 ui.data_mut(|d| d.insert_temp(last_id, Some(person.xref.clone())));
@@ -178,7 +189,7 @@ pub fn people_panel(
 
 /// Right-click menu shared by every place a person appears.
 pub fn person_context_menu(resp: &egui::Response, doc: &Document, xref: &str, fam: Option<&str>, actions: &mut Vec<Action>) {
-    ContextMenu::new(format!("ctx_{xref}_{}", fam.unwrap_or(""))).show(resp, |ui| {
+    ContextMenu::new(("person_ctx", resp.id)).show(resp, |ui| {
         if ui.add(MenuItem::new("Open profile")).clicked() {
             actions.push(Action::Select(xref.to_string()));
             actions.push(Action::SetTab(0));
@@ -186,6 +197,25 @@ pub fn person_context_menu(resp: &egui::Response, doc: &Document, xref: &str, fa
         if ui.add(MenuItem::new("Show in tree")).clicked() {
             actions.push(Action::Select(xref.to_string()));
             actions.push(Action::SetTab(TAB_TREE));
+        }
+        let (selected, home) = app_people(ui.ctx());
+        let first_name = |x: &str| doc.person(x).map(|p| if p.given.is_empty() { p.display.clone() } else { p.given.clone() }).unwrap_or_default();
+        // Relationship to whoever is selected, and to the home person.
+        let mut others: Vec<String> = selected.iter().chain(home.iter()).filter(|o| *o != xref).cloned().collect();
+        others.dedup();
+        for other in others {
+            let suffix = if home.as_deref() == Some(other.as_str()) { " (home)" } else { "" };
+            let label = format!("Relationship to {}{suffix}", first_name(&other));
+            if ui.add(MenuItem::new(label).icon(glyphs::NETWORK.to_string())).clicked() {
+                actions.push(Action::OpenRelationship { subject: xref.to_string(), reference: other });
+            }
+        }
+        if home.as_deref() == Some(xref) {
+            if ui.add(MenuItem::new("Clear home person").icon(glyphs::HOME.to_string())).clicked() {
+                actions.push(Action::SetHome(None));
+            }
+        } else if ui.add(MenuItem::new("Set as home person").icon(glyphs::HOME.to_string())).clicked() {
+            actions.push(Action::SetHome(Some(xref.to_string())));
         }
         if ui.add(MenuItem::new("Edit…").icon(glyphs::PENCIL.to_string())).clicked() {
             actions.push(Action::Edit(xref.to_string()));
@@ -280,11 +310,18 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
         // Hero.
         Card::new().padding(20.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(Avatar::new(person.initials()).size(AvatarSize::XLarge).tone(sex_tone(person.sex)).surface(p.card));
+                if person.photos.iter().any(|f| crate::widgets::media_uri(ui.ctx(), f).is_some()) {
+                    let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+                    paint_avatar(ui, rect.center(), 32.0, person);
+                } else {
+                    ui.add(Avatar::new(person.initials()).size(AvatarSize::XLarge).tone(sex_tone(person.sex)).surface(p.card));
+                }
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
+                    // Leave room for the Edit / Add relative / ⋯ buttons on the right.
+                    ui.set_max_width((ui.available_width() - 300.0).max(180.0));
                     ui.spacing_mut().item_spacing.y = 4.0;
-                    ui.label(RichText::new(&person.display).size(26.0).family(crate::fonts::semibold()).color(p.text));
+                    ui.add(egui::Label::new(RichText::new(&person.display).size(26.0).family(crate::fonts::semibold()).color(p.text)).wrap());
                     let mut line = person.lifespan();
                     let now = current_year();
                     match (person.birth_year, person.death_year) {
@@ -313,7 +350,11 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                         if !occ.is_empty() {
                             ui.add(Badge::new(occ, BadgeTone::Neutral).preserve_case());
                         }
+                        if app_people(ui.ctx()).1.as_deref() == Some(xref) {
+                            ui.add(Badge::new(format!("{}  Home person", glyphs::HOME), BadgeTone::Info).preserve_case());
+                        }
                     });
+                    home_relation_line(ui, doc, xref, actions);
                 });
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                     let more = ui.add(Button::new("⋯").outline().size(ButtonSize::Small));
@@ -324,7 +365,17 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                         if ui.add(MenuItem::new("Show in graph")).clicked() {
                             actions.push(Action::SetTab(TAB_GRAPH));
                         }
+                        if ui.add(MenuItem::new("Show relationships")).clicked() {
+                            actions.push(Action::SetTab(TAB_RELATION));
+                        }
                         ui.separator();
+                        if app_people(ui.ctx()).1.as_deref() == Some(xref) {
+                            if ui.add(MenuItem::new("Clear home person").icon(glyphs::HOME.to_string())).clicked() {
+                                actions.push(Action::SetHome(None));
+                            }
+                        } else if ui.add(MenuItem::new("Set as home person").icon(glyphs::HOME.to_string())).clicked() {
+                            actions.push(Action::SetHome(Some(xref.to_string())));
+                        }
                         if ui.add(MenuItem::new("Delete person…").icon(glyphs::TRASH.to_string()).danger()).clicked() {
                             actions.push(Action::Delete(xref.to_string()));
                         }
@@ -351,6 +402,7 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                 });
             }
             sources_card(ui, doc, xref, actions);
+            crate::mediaview::profile_card(ui, doc, xref, actions);
         };
         if wide {
             ui.columns(2, |cols| {
@@ -417,6 +469,9 @@ fn sources_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Actio
                             if let Some(q) = c.quality {
                                 ui.add(quality_badge(q));
                             }
+                            if let Some(m) = crate::mediaview::mini_thumbs(ui, doc, &c.media) {
+                                actions.push(Action::ViewMedia { media: m, person: Some(xref.to_string()) });
+                            }
                         });
                         let detail: Vec<&str> = [c.page.as_str(), c.author.as_str()].into_iter().filter(|s| !s.is_empty()).collect();
                         if !detail.is_empty() {
@@ -427,6 +482,38 @@ fn sources_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Actio
             }
         }
     });
+}
+
+/// "⌂ First cousin of Arthur Hartwell", linking to the Relationship view.
+fn home_relation_line(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>) {
+    let p = Theme::current(ui.ctx()).palette;
+    let Some(home) = app_people(ui.ctx()).1.filter(|h| h != xref && doc.person(h).is_some()) else { return };
+    let key = egui::Id::new(("home_relation", xref, &home));
+    let cached: Option<(u64, Option<String>)> = ui.data(|d| d.get_temp(key));
+    let label = match cached {
+        Some((rev, l)) if rev == doc.revision => l,
+        _ => {
+            let l = crate::kinship::find(doc, &home, xref).first().map(|k| crate::kinship::label(&crate::kinship::describe(doc, k)));
+            ui.data_mut(|d| d.insert_temp(key, (doc.revision, l.clone())));
+            l
+        }
+    };
+    let home_name = doc.person(&home).map(|p| p.display.clone()).unwrap_or_default();
+    let text = match label {
+        Some(l) => {
+            let mut c = l.chars();
+            let l = c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default();
+            format!("{}  {l} of {home_name}", glyphs::HOME)
+        }
+        None => format!("{}  Not related to {home_name}", glyphs::HOME),
+    };
+    let r = ui
+        .add(egui::Label::new(RichText::new(text).size(13.5).color(p.focus)).sense(Sense::click()))
+        .on_hover_text("Show how they're related")
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if r.clicked() {
+        actions.push(Action::OpenRelationship { subject: xref.to_string(), reference: home });
+    }
 }
 
 fn timeline_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>) {

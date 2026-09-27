@@ -33,6 +33,10 @@ cargo run --release -- path/to/family.ged
 - **Try the sample:** click *Explore the sample* on the start screen, or File → Open sample tree.
 - **Start a new tree:** File → New tree (Ctrl+N) and add the first person. Add parents, partners, children and siblings from the *Family* card on their profile, or from the dashed **+** slots in the Tree view.
 - **Edit someone:** select them and press Ctrl+E, or click *Edit* on their profile.
+- **See how two people are related:** right-click someone and choose *Relationship to …*, or open the Relationship section and pick both people.
+- **Add documents and photos:** drop files onto the window to attach them to the selected person, or use *Add* on their profile. Files are copied into a `<tree name> media` folder next to the tree file. Save a new tree before adding documents.
+- **Clean up an imported tree:** *Tools → Find duplicate people…* lists people who may have been entered twice and lets you compare and merge them; *Find duplicate sources…* merges repeated sources.
+- **Set a home person:** right-click someone and choose *Set as home person*. Each profile then shows how that person is related to them.
 - **Save:** Ctrl+S, or Ctrl+Shift+S to save as a new file.
 
 ## Sections
@@ -41,7 +45,9 @@ cargo run --release -- path/to/family.ged
 |----------|---------------|
 | Profile  | The selected person's details, life events, sources, family, and a small family map |
 | Tree     | Ancestors, descendants, or both around the selected person |
-| Graph    | People and families as connected nodes that can be edited by wiring them together |
+| Relationship | The line of descent connecting two people, and what the relationship is called |
+| Media    | Every document and photo in the tree, with filters for unattached and missing files |
+| Graph    | People and families as connected nodes that can be edited by wiring them together, either through family nodes or directly from parent to child |
 | Overview | Counts, common surnames and places, and people missing key details |
 | GEDCOM   | The selected person's records as they will be saved |
 
@@ -58,7 +64,8 @@ cargo run --release -- path/to/family.ged
 | Ctrl+E | Edit the selected person |
 | Ctrl+Enter | Save in the editor |
 | Alt+← / Alt+→ | Back / Forward |
-| Ctrl+1 … Ctrl+5 | Switch section |
+| Alt+Home | Go to the home person |
+| Ctrl+1 … Ctrl+7 | Switch section |
 
 In the Tree view, drag to pan and Ctrl+scroll to zoom.
 

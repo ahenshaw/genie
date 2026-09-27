@@ -1,7 +1,7 @@
 //! The profile's "Family map": a compact hourglass of the person's
 //! ancestors (above) and descendants (below), drawn as avatar dots.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
@@ -103,13 +103,60 @@ pub fn family_map(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Act
         });
         ui.label(egui::RichText::new(summary(c)).size(12.5).color(p.text_muted));
         ui.add_space(6.0);
-        draw(ui, doc, xref, actions);
+        draw(ui, doc, xref, actions, MapOptions::profile());
     });
+}
+
+/// What to draw and how much room to take.
+#[derive(Clone, Copy, Debug)]
+pub struct MapOptions {
+    /// Ancestor generations to show at most.
+    pub max_up: usize,
+    /// Dashed "add a parent" circles where a parent is unknown.
+    pub empty_slots: bool,
+    pub descendants: bool,
+    /// Clicking a circle selects that person.
+    pub interactive: bool,
+    pub max_width: f32,
+    /// Shrink to fit this height too (deep pedigrees).
+    pub max_height: Option<f32>,
+}
+
+impl MapOptions {
+    /// The profile's Family map.
+    pub fn profile() -> Self {
+        Self { max_up: MAX_UP, empty_slots: true, descendants: true, interactive: true, max_width: MAX_WIDTH, max_height: None }
+    }
+
+    /// Every known generation of ancestors, shrunk to fit a box.
+    pub fn lineage(width: f32, height: f32) -> Self {
+        Self { max_up: usize::MAX, empty_slots: false, descendants: false, interactive: false, max_width: width, max_height: Some(height) }
+    }
+}
+
+/// Dots drawn at most, however deep the pedigree (royal lines collapse
+/// onto the same ancestors many times over).
+const MAX_DOTS: usize = 1500;
+
+/// "19 generations back · 249 ancestors · 4 descendants", cached per tree revision.
+pub fn summary_line(ctx: &egui::Context, doc: &Document, xref: &str) -> String {
+    let key = egui::Id::new(("family_map_counts", xref));
+    let cached: Option<(u64, Arc<Counts>)> = ctx.data(|d| d.get_temp(key));
+    let c = match cached {
+        Some((rev, c)) if rev == doc.revision => *c,
+        _ => {
+            let c = counts(doc, xref);
+            ctx.data_mut(|d| d.insert_temp(key, (doc.revision, Arc::new(c))));
+            c
+        }
+    };
+    summary(c)
 }
 
 struct Map<'a> {
     doc: &'a Document,
     actions: &'a mut Vec<Action>,
+    interactive: bool,
 }
 
 impl Map<'_> {
@@ -132,7 +179,7 @@ impl Map<'_> {
             ui.painter().circle(center, radius, mix(p.card, base, if p.is_dark { 0.45 } else { 0.32 }), Stroke::new(1.0, mix(p.card, base, 0.65)));
         }
         let resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_ui(|ui| hover_card(ui, person));
-        if resp.clicked() && !is_root {
+        if resp.clicked() && !is_root && self.interactive {
             self.actions.push(Action::Select(xref.to_string()));
         }
     }
@@ -224,20 +271,30 @@ fn ancestor_radius(g: usize) -> f32 {
     }
 }
 
-/// How many ancestor generations to draw: every known one (up to
-/// `MAX_UP`) plus a row of empty slots, and always at least the parents.
-fn generations_up(doc: &Document, x: &str, g: usize, path: &mut Vec<String>) -> usize {
-    if g >= MAX_UP || path.iter().any(|p| p == x) {
-        return g;
+/// How many generations of known ancestors `x` has. Memoised: a pedigree
+/// that collapses onto the same ancestors is visited once per person, not
+/// once per path.
+fn generations_up(doc: &Document, x: &str, memo: &mut HashMap<String, usize>, active: &mut HashSet<String>) -> usize {
+    if let Some(&d) = memo.get(x) {
+        return d;
     }
-    path.push(x.to_string());
-    let d = [doc.father(x), doc.mother(x)].into_iter().flatten().map(|p| generations_up(doc, &p, g + 1, path)).max().unwrap_or(g);
-    path.pop();
+    if !active.insert(x.to_string()) {
+        return 0; // Someone recorded as their own ancestor.
+    }
+    let d = [doc.father(x), doc.mother(x)]
+        .into_iter()
+        .flatten()
+        .map(|p| 1 + generations_up(doc, &p, memo, active))
+        .max()
+        .unwrap_or(0);
+    active.remove(x);
+    memo.insert(x.to_string(), d);
     d
 }
 
-fn push_ancestors(t: &mut DotTree, doc: &Document, x: &str, i: usize, g: usize, up: usize, path: &mut Vec<String>) {
-    if g >= up || path.iter().any(|p| p == x) {
+#[allow(clippy::too_many_arguments)]
+fn push_ancestors(t: &mut DotTree, doc: &Document, x: &str, i: usize, g: usize, up: usize, empty_slots: bool, path: &mut Vec<String>) {
+    if g >= up || path.iter().any(|p| p == x) || t.nodes.len() >= MAX_DOTS {
         return;
     }
     path.push(x.to_string());
@@ -247,10 +304,11 @@ fn push_ancestors(t: &mut DotTree, doc: &Document, x: &str, i: usize, g: usize, 
             Some(p) if path.contains(&p) => continue,
             Some(p) => {
                 let c = t.push(Dot::Person(p.clone()), size, g + 1);
-                push_ancestors(t, doc, &p, c, g + 1, up, path);
+                push_ancestors(t, doc, &p, c, g + 1, up, empty_slots, path);
                 c
             }
-            None => t.push(Dot::Empty { child: x.to_string(), rel }, size, g + 1),
+            None if empty_slots => t.push(Dot::Empty { child: x.to_string(), rel }, size, g + 1),
+            None => continue,
         };
         t.nodes[i].children.push(c);
     }
@@ -264,22 +322,24 @@ const MORE_W: f32 = 26.0;
 const SPOUSE_GAP: f32 = 34.0;
 const SPOUSE_R: f32 = 11.0;
 
-fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>) {
+pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, opts: MapOptions) {
     let p = Theme::current(ui.ctx()).palette;
     let line = mix(p.border, p.text_faint, 0.35);
     let faint = mix(line, p.card, 0.5);
 
-    // Ancestors, laid out compactly around the root at x = 0.
-    let up = generations_up(doc, xref, 0, &mut Vec::new()).clamp(0, MAX_UP - 1) + 1;
+    // Ancestors, laid out compactly around the root at x = 0: every known
+    // generation, plus a row of "add" slots where those are wanted.
+    let known = generations_up(doc, xref, &mut HashMap::new(), &mut HashSet::new());
+    let up = if opts.empty_slots { known.min(opts.max_up.saturating_sub(1)) + 1 } else { known.min(opts.max_up) };
     let mut anc = DotTree::default();
     let root = anc.push(Dot::Person(xref.to_string()), ancestor_radius(0) * 2.0, 0);
-    push_ancestors(&mut anc, doc, xref, root, 0, up, &mut Vec::new());
+    push_ancestors(&mut anc, doc, xref, root, 0, up, opts.empty_slots, &mut Vec::new());
     let anc_x = tidy::layout(&anc.nodes, root, DOT_GAP);
 
     // Descendants, laid out around the hub the children hang from.
     let fams = doc.spouse_families(xref);
     let spouses: Vec<String> = fams.iter().filter_map(|f| doc.spouse_in(f, xref)).take(2).collect();
-    let kids: Vec<String> = fams.iter().flat_map(|f| doc.children(f)).collect();
+    let kids: Vec<String> = if opts.descendants { fams.iter().flat_map(|f| doc.children(f)).collect() } else { Vec::new() };
     let mut desc = DotTree::default();
     let hub = desc.push(Dot::Hub, 0.0, 0);
     for k in kids.iter().take(MAX_CHILDREN) {
@@ -315,19 +375,24 @@ fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>) {
         hi = hi.max(hub_offset + desc_x[i] + n.size / 2.0);
     }
 
-    // Shrink to fit the card if the family is wide; never enlarge.
-    let avail = ui.available_width().min(MAX_WIDTH);
-    let scale = (avail / (hi - lo)).min(1.0);
-    let height = (up + 1 + down) as f32 * ROW_H;
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    // Shrink to fit the width (and height, if limited); never enlarge.
+    let avail = ui.available_width().min(opts.max_width);
+    let rows = (up + 1 + down) as f32;
+    let row_h = match opts.max_height {
+        Some(h) => (h / rows).min(ROW_H),
+        None => ROW_H,
+    };
+    let scale = (avail / (hi - lo)).min(row_h / ROW_H).min(1.0);
+    let height = rows * row_h;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width().min(opts.max_width.max(avail)), height), Sense::hover());
     let x_of = |v: f32| rect.center().x + (v - (lo + hi) / 2.0) * scale;
-    let r_of = |r: f32| (r * scale).max(3.0);
-    let row_y = |row: isize| rect.top() + ROW_H / 2.0 + (row + up as isize) as f32 * ROW_H;
+    let r_of = |r: f32| (r * scale).max(if opts.max_height.is_some() { 2.0 } else { 3.0 });
+    let row_y = |row: isize| rect.top() + row_h / 2.0 + (row + up as isize) as f32 * row_h;
     let anc_pos = |i: usize| pos2(x_of(anc_x[i]), row_y(-(anc.generation[i] as isize)));
     let desc_pos = |i: usize| pos2(x_of(hub_offset + desc_x[i]), row_y(desc.generation[i] as isize));
     let root_pos = anc_pos(root);
 
-    let mut map = Map { doc, actions };
+    let mut map = Map { doc, actions, interactive: opts.interactive };
 
     // Ancestor links: each person up to a bar joining their two parents.
     for (i, n) in anc.nodes.iter().enumerate() {

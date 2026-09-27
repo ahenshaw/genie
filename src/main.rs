@@ -1,12 +1,18 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod dedup;
 mod fonts;
 mod gedcom;
 mod graph;
+mod kinship;
+mod media;
+mod mediaview;
 mod minimap;
 mod model;
+mod relation;
 mod tidy;
+mod tools;
 mod tree;
 mod views;
 mod widgets;

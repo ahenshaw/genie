@@ -26,9 +26,43 @@ pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()))
 }
 
-/// A filled circle with initials, cheaper than `Avatar` for long lists.
+/// The open tree's path, published by the app each frame, so media paths
+/// (relative to it) can be resolved anywhere.
+pub fn tree_path(ctx: &egui::Context) -> Option<std::path::PathBuf> {
+    ctx.data(|d| d.get_temp::<Option<std::path::PathBuf>>(egui::Id::new("genie_tree_path"))).flatten()
+}
+
+/// An image URI for a GEDCOM media path, if the file exists.
+pub fn media_uri(ctx: &egui::Context, file: &str) -> Option<String> {
+    let path = crate::media::resolve(tree_path(ctx).as_deref(), file)?;
+    path.is_file().then(|| format!("file://{}", path.display()))
+}
+
+/// Paints an image cropped to fill `rect` (like CSS `object-fit: cover`).
+/// Returns false while it's still loading or if it can't be read.
+pub fn paint_cover(ui: &Ui, uri: &str, rect: Rect, rounding: impl Into<CornerRadius>) -> bool {
+    let poll = ui.ctx().try_load_texture(uri, egui::TextureOptions::LINEAR, egui::SizeHint::Scale(1.0.into()));
+    let Ok(egui::load::TexturePoll::Ready { texture }) = poll else { return false };
+    let (iw, ih) = (texture.size.x.max(1.0), texture.size.y.max(1.0));
+    let (rw, rh) = (rect.width().max(1.0), rect.height().max(1.0));
+    let scale = (rw / iw).max(rh / ih);
+    let (u, v) = ((rw / scale / iw).min(1.0), (rh / scale / ih).min(1.0));
+    let uv = Rect::from_center_size(pos2(0.5, 0.5), vec2(u, v));
+    egui::Image::from_texture(texture).uv(uv).corner_radius(rounding).paint_at(ui, rect);
+    true
+}
+
+/// A filled circle with initials (or their photo), cheaper than `Avatar`
+/// for long lists.
 pub fn paint_avatar(ui: &Ui, center: egui::Pos2, radius: f32, person: &PersonSummary) {
     let p = Theme::current(ui.ctx()).palette;
+    if let Some(uri) = person.photos.iter().find_map(|f| media_uri(ui.ctx(), f)) {
+        let rect = Rect::from_center_size(center, vec2(radius * 2.0, radius * 2.0));
+        if paint_cover(ui, &uri, rect, CornerRadius::same(radius.round().clamp(0.0, 255.0) as u8)) {
+            ui.painter().circle_stroke(center, radius, Stroke::new(1.0, mix(p.card, sex_color(&p, person.sex), 0.6)));
+            return;
+        }
+    }
     let base = sex_color(&p, person.sex);
     let fill = mix(p.card, base, if p.is_dark { 0.35 } else { 0.22 });
     let painter = ui.painter();
@@ -176,4 +210,36 @@ pub fn history_buttons(ui: &mut Ui, can_back: bool, can_forward: bool) -> (Respo
     let fwd = out.pop().unwrap();
     let back = out.pop().unwrap();
     (back, fwd)
+}
+
+/// A search box with a × to clear it (shown when there's text). Esc while
+/// typing clears it too.
+pub fn search_input(ui: &mut Ui, text: &mut String, hint: &str, id: impl elegance::IdSalt, width: Option<f32>) -> Response {
+    let p = Theme::current(ui.ctx()).palette;
+    let mut input = elegance::TextInput::new(&mut *text).hint(hint).id_salt(id);
+    if let Some(w) = width {
+        input = input.desired_width(w);
+    }
+    let resp = ui.add(input);
+    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if !text.is_empty() && (resp.has_focus() || resp.lost_focus()) && escaped {
+        text.clear();
+        resp.request_focus();
+    }
+    if !text.is_empty() {
+        let r = Rect::from_center_size(pos2(resp.rect.right() - 15.0, resp.rect.center().y), vec2(22.0, 22.0));
+        let x = ui.interact(r, resp.id.with("clear"), Sense::click()).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let color = if x.hovered() {
+            ui.painter().circle_filled(r.center(), 9.5, mix(p.input_bg, p.border, 0.7));
+            p.text
+        } else {
+            p.text_faint
+        };
+        ui.painter().text(r.center(), Align2::CENTER_CENTER, elegance::glyphs::X.to_string(), FontId::proportional(13.0), color);
+        if x.on_hover_text("Clear").clicked() {
+            text.clear();
+            resp.request_focus();
+        }
+    }
+    resp
 }

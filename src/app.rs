@@ -1,5 +1,6 @@
 //! Application shell: state, menus, file handling, dialogs, and the editor.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui::{Align, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, RichText, Ui};
@@ -9,18 +10,24 @@ use elegance::{
     Toast, Toasts, glyphs,
 };
 
-use crate::graph::FamilyGraph;
+use crate::graph::{FamilyGraph, LinkMode};
 use crate::model::{self, CitationForm, CiteSource, Document, FactKey, PersonForm, Relation, Sex};
+use crate::mediaview::MediaUi;
+use crate::relation::RelationView;
+use crate::tools::ToolsUi;
 use crate::tree::TreeView;
 use crate::views;
 use crate::widgets::{self, section_label};
 
 const SAMPLE: &[u8] = include_bytes!("sample.ged");
 const MAX_RECENT: usize = 10;
-pub const TABS: [&str; 5] = ["Profile", "Tree", "Graph", "Overview", "GEDCOM"];
+pub const TABS: [&str; 7] = ["Profile", "Tree", "Relationship", "Graph", "Media", "Overview", "GEDCOM"];
 pub const TAB_PROFILE: usize = 0;
 pub const TAB_TREE: usize = 1;
-pub const TAB_GRAPH: usize = 2;
+pub const TAB_RELATION: usize = 2;
+pub const TAB_GRAPH: usize = 3;
+pub const TAB_MEDIA: usize = 4;
+pub const TAB_OVERVIEW: usize = 5;
 
 /// Something a view asks the app to do once the frame's UI is drawn.
 #[derive(Clone, Debug)]
@@ -36,6 +43,26 @@ pub enum Action {
     SetTab(usize),
     /// Switch to the Tree section showing ancestors and descendants together.
     OpenTreeBoth,
+    /// Show how `subject` is related to `reference`.
+    OpenRelationship { subject: String, reference: String },
+    SetHome(Option<String>),
+    /// Select the home person.
+    GoHome,
+    ViewMedia { media: String, person: Option<String> },
+    EditMedia(String),
+    /// Choose files to add, attached to a person or (with `None`) not yet.
+    PickMedia(Option<String>),
+    AddMedia { person: Option<String>, files: Vec<PathBuf> },
+    SetPrimaryPhoto { person: String, media: Option<String> },
+    LocateMedia(String),
+    /// Choose a file for a document, copied into the media folder.
+    ReplaceMediaFile(String),
+    /// Search a folder for files for documents that are missing one.
+    FindMissingMedia,
+    FindDuplicatePeople,
+    FindDuplicateSources,
+    /// A merge removed a person; move the selection to who they became.
+    MergedPerson { kept: String, removed: String },
     Open(Option<PathBuf>),
     New,
     Sample,
@@ -97,6 +124,15 @@ pub struct GenieApp {
     focus_search: bool,
     tree: TreeView,
     graph: FamilyGraph,
+    relation: RelationView,
+    media_ui: MediaUi,
+    tools: ToolsUi,
+    /// Pairs marked "not duplicates", per file, remembered between runs.
+    not_dupes: HashMap<String, HashSet<String>>,
+    /// The person relationships are described from, for this file.
+    home: Option<String>,
+    /// Home person per file, remembered between runs.
+    homes: HashMap<String, String>,
     editor: Option<Editor>,
     confirm_delete: Option<String>,
     pending: Option<Pending>,
@@ -124,6 +160,12 @@ impl GenieApp {
             focus_search: false,
             tree: TreeView::default(),
             graph: FamilyGraph::new(),
+            relation: RelationView::default(),
+            media_ui: MediaUi::default(),
+            tools: ToolsUi::default(),
+            not_dupes: HashMap::new(),
+            home: None,
+            homes: HashMap::new(),
             editor: None,
             confirm_delete: None,
             pending: None,
@@ -140,12 +182,24 @@ impl GenieApp {
                 && let Some(found) = BuiltInTheme::all().into_iter().find(|b| b.label() == t) {
                     app.theme = found;
                 }
+            if storage.get_string("graph_links").as_deref() == Some(LinkMode::Direct.label()) {
+                app.graph.set_mode(LinkMode::Direct);
+            }
+            if let Some(n) = storage.get_string("not_dupes") {
+                for (path, pair) in n.lines().filter_map(|l| l.split_once('\t')) {
+                    app.not_dupes.entry(path.to_string()).or_default().insert(pair.to_string());
+                }
+            }
+            if let Some(h) = storage.get_string("homes") {
+                app.homes = h.lines().filter_map(|l| l.split_once('\t')).map(|(p, x)| (p.to_string(), x.to_string())).collect();
+            }
             if let Some(r) = storage.get_string("recent") {
                 app.recent = r.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect();
             }
         }
         app.theme.theme().install(&cc.egui_ctx);
         crate::fonts::install(&cc.egui_ctx);
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(path) = open {
             app.load_path(&cc.egui_ctx, &path);
         }
@@ -160,6 +214,10 @@ impl GenieApp {
             .iter()
             .find(|r| r.tag == "INDI")
             .and_then(|r| r.xref.clone());
+        self.home = doc.path.as_deref().and_then(|p| self.homes.get(&path_key(p))).cloned();
+        self.relation = RelationView::default();
+        self.media_ui = MediaUi::default();
+        self.tools = ToolsUi::default();
         self.doc = Some(doc);
         self.history.clear();
         self.history_pos = 0;
@@ -229,10 +287,20 @@ impl GenieApp {
                 p
             }
         };
+        // Moving the tree to another folder: keep media paths pointing at the same files.
+        let old_dir = doc.path.as_ref().and_then(|p| p.parent()).map(Path::to_path_buf);
+        if let (Some(old), Some(new)) = (old_dir, path.parent())
+            && old != new
+        {
+            doc.rebase_media(&old, new);
+        }
         match std::fs::write(&path, doc.to_gedcom()) {
             Ok(()) => {
                 doc.path = Some(path.clone());
                 doc.dirty = false;
+                if let Some(h) = &self.home {
+                    self.homes.insert(path_key(&path), h.clone());
+                }
                 self.remember_recent(&path);
                 Toast::new(format!("Saved {}", file_label(&path))).tone(BadgeTone::Ok).show(ctx);
                 true
@@ -293,6 +361,35 @@ impl GenieApp {
         }
     }
 
+    /// Copies files into the tree's media folder and adds them as documents,
+    /// attached to `person` when given.
+    fn add_media(&mut self, ctx: &egui::Context, person: Option<String>, files: Vec<PathBuf>) {
+        if files.is_empty() || self.doc.is_none() {
+            return;
+        }
+        if self.doc.as_ref().is_some_and(|d| d.path.is_none()) {
+            Toast::new("Save the tree first").description("Documents are copied into a media folder next to the tree file.").show(ctx);
+            if !self.save(ctx, true) {
+                return;
+            }
+        }
+        let Some(doc) = self.doc.as_mut() else { return };
+        let Some(tree) = doc.path.clone() else { return };
+        let (created, failed) = crate::media::add_files(doc, &tree, &files, person.as_deref());
+        for (f, e) in failed {
+            Toast::new(format!("Couldn't add {}", f.display())).tone(BadgeTone::Danger).description(e).show(ctx);
+        }
+        if created.is_empty() {
+            return;
+        }
+        let n = created.len();
+        let to = person.as_deref().and_then(|p| doc.person(p)).map(|p| format!(" to {}", p.display)).unwrap_or_default();
+        Toast::new(format!("Added {n} document{}{to}", if n == 1 { "" } else { "s" })).tone(BadgeTone::Ok).show(ctx);
+        if let [one] = created.as_slice() {
+            self.media_ui.edit(doc, one);
+        }
+    }
+
     // ---- navigation -------------------------------------------------------------
 
     fn select(&mut self, xref: String) {
@@ -307,6 +404,11 @@ impl GenieApp {
         }
         self.history_pos = self.history.len() - 1;
         self.selected = Some(xref);
+    }
+
+    /// The home person, if set and still in the tree.
+    fn live_home(&self) -> Option<String> {
+        self.home.clone().filter(|h| self.doc.as_ref().is_some_and(|d| d.person(h).is_some()))
     }
 
     /// The history position a step of `delta` would land on, skipping
@@ -556,11 +658,14 @@ impl GenieApp {
             if consume(Modifiers::ALT, Key::ArrowRight) {
                 self.actions.push(Action::Forward);
             }
+            if consume(Modifiers::ALT, Key::Home) {
+                self.actions.push(Action::GoHome);
+            }
             if consume(cmd, Key::E)
                 && let Some(x) = &self.selected {
                     self.actions.push(Action::Edit(x.clone()));
                 }
-            for (i, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5].into_iter().enumerate() {
+            for (i, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7].into_iter().enumerate() {
                 if consume(cmd, key) {
                     self.actions.push(Action::SetTab(i));
                 }
@@ -591,6 +696,131 @@ impl GenieApp {
                     }
                 }
                 Action::SetTab(t) => self.tab = t,
+                Action::OpenRelationship { subject, reference } => {
+                    self.select(subject);
+                    self.relation.reference = Some(reference);
+                    self.tab = TAB_RELATION;
+                }
+                Action::ViewMedia { media, person } => self.media_ui.view(media, person),
+                Action::EditMedia(m) => {
+                    if let Some(doc) = &self.doc {
+                        self.media_ui.edit(doc, &m);
+                    }
+                }
+                Action::PickMedia(person) => {
+                    if let Some(files) = rfd::FileDialog::new()
+                        .add_filter("Images and documents", &["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff", "pdf", "txt", "doc", "docx"])
+                        .add_filter("All files", &["*"])
+                        .pick_files()
+                    {
+                        self.add_media(ctx, person, files);
+                    }
+                }
+                Action::AddMedia { person, files } => self.add_media(ctx, person, files),
+                Action::SetPrimaryPhoto { person, media } => {
+                    if let Some(doc) = self.doc.as_mut() {
+                        match media {
+                            Some(m) => doc.mutate(|d| d.set_primary_photo(&person, &m)),
+                            None => doc.mutate(|d| d.clear_primary_photo(&person)),
+                        }
+                    }
+                }
+                Action::LocateMedia(m) => {
+                    let Some(doc) = self.doc.as_mut() else { continue };
+                    if let Some(found) = rfd::FileDialog::new().set_title("Where is this file now?").pick_file() {
+                        let file = match doc.path.as_deref().and_then(|t| t.parent()) {
+                            Some(base) => pathdiff::diff_paths(&found, base).unwrap_or(found.clone()),
+                            None => found.clone(),
+                        };
+                        let file = crate::media::path_string(&file);
+                        doc.mutate(|d| d.relink_media(&m, &file));
+                        Toast::new("File located").tone(BadgeTone::Ok).show(ctx);
+                    }
+                }
+                Action::FindMissingMedia => {
+                    let Some(doc) = self.doc.as_mut() else { continue };
+                    let Some(folder) = rfd::FileDialog::new().set_title("Search this folder for files").pick_folder() else { continue };
+                    let items = doc.media_items();
+                    let wanted = items.iter().filter(|m| crate::media::needs_file(doc.path.as_deref(), m)).count();
+                    let found = crate::media::find_files(doc.path.as_deref(), &items, &folder);
+                    // Files that moved are linked where they are now; files for
+                    // records that never had one are copied into the media folder.
+                    let mut links = Vec::new();
+                    for f in &found {
+                        let link = match (&doc.path, f.was_empty) {
+                            (Some(tree), true) => crate::media::import_file(tree, &f.path).ok(),
+                            (Some(tree), false) => tree.parent().and_then(|b| pathdiff::diff_paths(&f.path, b)).map(|p| crate::media::path_string(&p)),
+                            (None, _) => Some(crate::media::path_string(&f.path)),
+                        };
+                        if let Some(link) = link {
+                            links.push((f.media.clone(), link));
+                        }
+                    }
+                    if !links.is_empty() {
+                        doc.mutate(|d| {
+                            for (m, file) in &links {
+                                d.relink_media(m, file);
+                            }
+                        });
+                    }
+                    let tone = if links.len() == wanted { BadgeTone::Ok } else { BadgeTone::Warning };
+                    Toast::new(format!("Found {} of {wanted} files", links.len())).tone(tone).show(ctx);
+                }
+                Action::ReplaceMediaFile(m) => {
+                    let Some(doc) = self.doc.as_mut() else { continue };
+                    let Some(tree) = doc.path.clone() else {
+                        Toast::new("Save the tree first").show(ctx);
+                        continue;
+                    };
+                    if let Some(src) = rfd::FileDialog::new().pick_file() {
+                        match crate::media::import_file(&tree, &src) {
+                            Ok(rel) => {
+                                doc.mutate(|d| d.relink_media(&m, &rel));
+                                Toast::new("File added").tone(BadgeTone::Ok).show(ctx);
+                            }
+                            Err(e) => Toast::new("Couldn't copy the file").tone(BadgeTone::Danger).description(e.to_string()).show(ctx),
+                        }
+                    }
+                }
+                Action::FindDuplicatePeople => {
+                    if let Some(doc) = &self.doc {
+                        let key = doc.path.as_deref().map(path_key).unwrap_or_default();
+                        let dismissed = self.not_dupes.get(&key).cloned().unwrap_or_default();
+                        self.tools.open_people(doc, &dismissed);
+                    }
+                }
+                Action::FindDuplicateSources => {
+                    if let Some(doc) = &self.doc {
+                        self.tools.open_sources(doc);
+                    }
+                }
+                Action::MergedPerson { kept, removed } => {
+                    if self.selected.as_deref() == Some(removed.as_str()) {
+                        self.selected = None;
+                        self.select(kept);
+                    }
+                }
+                Action::GoHome => match self.live_home() {
+                    Some(h) => self.select(h),
+                    None => {
+                        Toast::new("No home person set").description("Right-click someone and choose Set as home person.").show(ctx);
+                    }
+                },
+                Action::SetHome(x) => {
+                    let name = x.as_deref().and_then(|x| self.doc.as_ref()?.person(x)).map(|p| p.display.clone());
+                    if let Some(path) = self.doc.as_ref().and_then(|d| d.path.as_deref()) {
+                        match &x {
+                            Some(x) => self.homes.insert(path_key(path), x.clone()),
+                            None => self.homes.remove(&path_key(path)),
+                        };
+                    }
+                    self.home = x;
+                    let msg = match name {
+                        Some(n) => format!("{n} is now the home person"),
+                        None => "Home person cleared".into(),
+                    };
+                    Toast::new(msg).show(ctx);
+                }
                 Action::OpenTreeBoth => {
                     self.tree.show_both();
                     self.tab = TAB_TREE;
@@ -658,6 +888,7 @@ impl GenieApp {
             bar = bar.status_with_dot(status, if dirty { p.amber } else { p.green });
         }
         let (tab, can_back, can_forward) = (self.tab, self.can_back(), self.can_forward());
+        let home = self.live_home();
         let acts = &mut self.actions;
         let recent = self.recent.clone();
         let selected = self.selected.clone();
@@ -743,9 +974,31 @@ impl GenieApp {
                 if ui.add(MenuItem::new("Forward").icon(glyphs::ARROW_RIGHT.to_string()).shortcut("Alt →").enabled(can_forward)).clicked() {
                     acts.push(Action::Forward);
                 }
+                let label = match home.as_deref().and_then(|h| self.doc.as_ref()?.person(h)) {
+                    Some(p) => format!("Home person ({})", p.display),
+                    None => "Home person".to_string(),
+                };
+                let item = ui.add(MenuItem::new(label).icon(glyphs::HOME.to_string()).shortcut("Alt Home").enabled(home.is_some()));
+                if home.is_none() {
+                    item.on_disabled_hover_text("Right-click someone and choose Set as home person");
+                } else if item.clicked() {
+                    acts.push(Action::GoHome);
+                }
                 ui.separator();
                 if ui.add(MenuItem::new("Find person").icon(glyphs::SEARCH.to_string()).shortcut("Ctrl F").enabled(has_doc)).clicked() {
                     focus_search = true;
+                }
+            });
+            bar.menu("Tools", |ui| {
+                if ui.add(MenuItem::new("Find duplicate people…").icon(glyphs::SEARCH.to_string()).enabled(has_doc)).clicked() {
+                    acts.push(Action::FindDuplicatePeople);
+                }
+                if ui.add(MenuItem::new("Find duplicate sources…").enabled(has_doc)).clicked() {
+                    acts.push(Action::FindDuplicateSources);
+                }
+                ui.separator();
+                if ui.add(MenuItem::new("Find media files…").icon(glyphs::FOLDER_OPEN.to_string()).enabled(has_doc)).on_hover_text("Search a folder for missing files, and for files belonging to records that have none").clicked() {
+                    acts.push(Action::FindMissingMedia);
                 }
             });
             bar.menu("Help", |ui| {
@@ -947,7 +1200,8 @@ impl GenieApp {
                     ("Ctrl E", "Edit selected person"),
                     ("Ctrl Enter", "Save in the editor"),
                     ("Alt ← / Alt →", "Back / Forward"),
-                    ("Ctrl 1 … 5", "Switch section"),
+                    ("Alt Home", "Go to the home person"),
+                    ("Ctrl 1 … 7", "Switch section"),
                     ("↑ / ↓ in search", "Move through people"),
                 ] {
                     ui.label(RichText::new(k).monospace().color(p.focus));
@@ -996,7 +1250,7 @@ impl GenieApp {
                             ui.add_space(6.0);
                         }
                         if can_link && ed.source == 1 {
-                            let r = ui.add(TextInput::new(&mut ed.pick_search).hint("Search people…").id_salt("pick_search"));
+                            let r = widgets::search_input(ui, &mut ed.pick_search, "Search people…", "pick_search", None);
                             if ed.focus_first {
                                 if r.has_focus() {
                                     ed.focus_first = false;
@@ -1163,6 +1417,11 @@ fn place_input(ui: &mut Ui, value: &mut String, id: &str, places: &[(String, usi
     }
 }
 
+/// Identifies a file across runs, however it was opened.
+fn path_key(p: &Path) -> String {
+    p.canonicalize().unwrap_or_else(|_| p.to_path_buf()).display().to_string()
+}
+
 fn file_label(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -1180,10 +1439,17 @@ impl eframe::App for GenieApp {
             self.unsaved_open = true;
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
-        if self.doc.is_some()
-            && let Some(path) = dropped.into_iter().next() {
+        if self.doc.is_some() && !dropped.is_empty() {
+            let is_ged = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ged"));
+            let (trees, files): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(is_ged);
+            if let Some(path) = trees.into_iter().next() {
                 self.actions.push(Action::Open(Some(path)));
+            } else {
+                // Documents: onto the selected person, or into the library from the Media section.
+                let person = if self.tab == TAB_MEDIA { None } else { self.selected.clone() };
+                self.actions.push(Action::AddMedia { person, files });
             }
+        }
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("menubar")
@@ -1198,6 +1464,15 @@ impl eframe::App for GenieApp {
                 .show(ui, |ui| self.toolbar(ui));
 
             let mut doc = self.doc.take().expect("checked above");
+            // Menus anywhere offer relationships to these two.
+            let home = self.home.clone().filter(|h| doc.person(h).is_some());
+            let selected = self.selected.clone();
+            let tree = doc.path.clone();
+            ctx.data_mut(|d| {
+                d.insert_temp(egui::Id::new("genie_selected"), selected);
+                d.insert_temp(egui::Id::new("genie_home"), home.clone());
+                d.insert_temp(egui::Id::new("genie_tree_path"), tree);
+            });
             egui::Panel::left("people")
                 .resizable(true)
                 .default_size(300.0)
@@ -1209,14 +1484,16 @@ impl eframe::App for GenieApp {
             egui::CentralPanel::default()
                 .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 12, right: 16, top: 12, bottom: 12 }))
                 .show(ui, |ui| {
-                    if doc.people().is_empty() && self.tab != TAB_GRAPH && self.tab != 3 {
+                    if doc.people().is_empty() && !matches!(self.tab, TAB_GRAPH | TAB_MEDIA | TAB_OVERVIEW) {
                         views::empty_tree(ui, &mut self.actions);
                     } else {
                         match self.tab {
                             TAB_PROFILE => views::profile(ui, &doc, self.selected.as_deref(), &mut self.actions),
                             TAB_TREE => self.tree.show(ui, &doc, self.selected.as_deref(), &mut self.actions),
+                            TAB_RELATION => self.relation.show(ui, &doc, self.selected.as_deref(), home.as_deref(), &mut self.actions),
                             TAB_GRAPH => self.graph.show(ui, &mut doc, self.selected.as_deref(), &mut self.actions),
-                            3 => views::overview(ui, &doc, &self.load_notes, &mut self.actions),
+                            TAB_MEDIA => self.media_ui.section(ui, &doc, &mut self.actions),
+                            TAB_OVERVIEW => views::overview(ui, &doc, &self.load_notes, &mut self.actions),
                             _ => views::source(ui, &doc, self.selected.as_deref(), &mut self.actions),
                         }
                     }
@@ -1228,6 +1505,12 @@ impl eframe::App for GenieApp {
         }
 
         self.editor_drawer(&ctx);
+        if let Some(doc) = self.doc.as_mut() {
+            self.media_ui.overlays(&ctx, doc, &mut self.actions);
+            let key = doc.path.as_deref().map(path_key).unwrap_or_default();
+            let dismissed = self.not_dupes.entry(key).or_default();
+            self.tools.overlays(&ctx, doc, dismissed, &mut self.actions);
+        }
         self.modals(&ctx);
         Toasts::new().render(&ctx);
         self.process_actions(&ctx);
@@ -1236,6 +1519,11 @@ impl eframe::App for GenieApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         storage.set_string("theme", self.theme.label().to_string());
+        let not_dupes: Vec<String> = self.not_dupes.iter().flat_map(|(p, set)| set.iter().map(move |k| format!("{p}\t{k}"))).collect();
+        storage.set_string("not_dupes", not_dupes.join("\n"));
+        let homes: Vec<String> = self.homes.iter().map(|(p, x)| format!("{p}\t{x}")).collect();
+        storage.set_string("homes", homes.join("\n"));
+        storage.set_string("graph_links", self.graph.mode().label().to_string());
         let recent: Vec<String> = self.recent.iter().map(|p| p.display().to_string()).collect();
         storage.set_string("recent", recent.join("\n"));
     }
