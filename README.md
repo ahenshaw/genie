@@ -8,6 +8,10 @@ A desktop app for viewing, building and editing family trees stored as GEDCOM fi
 
 ![The Graph view](docs/graph.png)
 
+## Install on Windows
+
+**[Download the latest Windows installer](https://github.com/ahenshaw/genie/releases/latest/download/Genie-windows-x64-setup.exe)**, or pick a version from the [Releases](https://github.com/ahenshaw/genie/releases) page (`Genie-<version>-windows-x64-setup.exe`), and run it. It installs for your user account without needing admin rights; tick *Open .ged files with Genie* if you want double-clicking a GEDCOM file to open it in Genie. Windows SmartScreen may warn that the installer is from an unknown publisher, as it isn't code-signed: choose *More info → Run anyway*.
+
 ## Requirements
 
 - Rust 1.95 or newer ([rustup.rs](https://rustup.rs))
@@ -83,6 +87,19 @@ This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser`
 | Ctrl+1 … Ctrl+7 | Switch section |
 
 In the Tree view, drag to pan and Ctrl+scroll to zoom.
+
+## Making a release
+
+The *Windows installer* workflow (`.github/workflows/windows.yml`) builds the installer with [Inno Setup](https://jrsoftware.org/isinfo.php) from `installer/genie.iss`. To publish one:
+
+1. Set the new version in `Cargo.toml` and commit it.
+2. Tag the commit to match and push the tag:
+   ```sh
+   git tag v0.2.0
+   git push origin v0.2.0
+   ```
+
+The workflow tests and builds Genie (including the browser app), then creates a GitHub release for the tag with the installer attached, which the download link above then points to. It fails if the tag doesn't match the version in `Cargo.toml`. Running the workflow by hand (*Actions → Windows installer → Run workflow*) builds the installer as a workflow artifact without making a release.
 
 ## Tests
 

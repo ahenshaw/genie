@@ -1,0 +1,73 @@
+name: Windows installer
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  installer:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --release
+
+      # The browser app for `genie --serve`, embedded by the build below.
+      - name: Build browser app
+        run: trunk build --release
+
+      - name: Build
+        run: cargo build --release
+
+      - name: Read version
+        shell: pwsh
+        run: |
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            Write-Error "Tag $env:GITHUB_REF_NAME doesn't match Cargo.toml version $version"
+            exit 1
+          }
+          "VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          # Chocolatey may install Inno Setup 6 or 7, 32- or 64-bit.
+          $iscc = Get-ChildItem "$env:ProgramFiles\Inno Setup *\ISCC.exe", "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $iscc) { Write-Error "ISCC.exe not found"; exit 1 }
+          & $iscc.FullName "/DAppVersion=$env:VERSION" installer\genie.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # The same installer without the version in its name, so the README can
+          # link to releases/latest/download/Genie-windows-x64-setup.exe.
+          Copy-Item "target\installer\Genie-$env:VERSION-windows-x64-setup.exe" "target\installer\Genie-windows-x64-setup.exe"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Genie-${{ env.VERSION }}-windows-x64-setup
+          path: target/installer/Genie-${{ env.VERSION }}-windows-x64-setup.exe
+
+      - name: Attach to release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/installer/*.exe
+          generate_release_notes: true
