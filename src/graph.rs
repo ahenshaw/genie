@@ -87,7 +87,14 @@ pub struct FamilyGraph {
 impl FamilyGraph {
     pub fn new() -> Self {
         Self {
-            editor: NodeEditor::new(),
+            // Scroll always pans, as in the tree views; Ctrl+scroll or a pinch
+            // zooms. nodez's Auto mode guesses trackpad vs. wheel per event, and
+            // a wrong guess turned two-finger scrolls into small zooms.
+            editor: {
+                let mut editor = NodeEditor::new();
+                editor.scroll_mode = nodez::ScrollMode::Pan;
+                editor
+            },
             mode: LinkMode::Families,
             kits: [kit(LinkMode::Families), kit(LinkMode::Direct)],
             graph: Graph::new(),

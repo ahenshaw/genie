@@ -105,6 +105,8 @@ pub struct EventView {
 pub struct PersonForm {
     pub given: String,
     pub surname: String,
+    /// Name suffix such as `Jr` or `III`.
+    pub suffix: String,
     pub sex: Sex,
     pub birth_date: String,
     pub birth_place: String,
@@ -639,6 +641,7 @@ impl Document {
         PersonForm {
             given,
             surname,
+            suffix: r.child("NAME").map(name_suffix).unwrap_or_default(),
             sex: Sex::from_gedcom(r.child_value("SEX")),
             birth_date: ev("BIRT", "DATE"),
             birth_place: ev("BIRT", "PLAC"),
@@ -721,23 +724,26 @@ impl Document {
         }
         let given = form.given.trim();
         let surname = form.surname.trim();
+        let suffix = form.suffix.trim();
         let name_unchanged = r.child("NAME").is_some_and(|n| {
             let (g, s) = split_name(n);
-            g == given && s == surname
+            g == given && s == surname && name_suffix(n) == suffix
         });
         if !name_unchanged {
             let name = r.ensure_child("NAME");
-            let suffix = name.value.splitn(3, '/').nth(2).unwrap_or("").trim().to_string();
             name.value = match (given.is_empty(), surname.is_empty()) {
                 (_, false) => format!("{given} /{surname}/ {suffix}").trim().to_string(),
                 (false, true) => format!("{given} {suffix}").trim().to_string(),
-                (true, true) => suffix,
+                (true, true) => suffix.to_string(),
             };
             if name.child("GIVN").is_some() || !given.is_empty() && name.children.iter().any(|c| c.tag == "SURN") {
                 name.set_child_value("GIVN", given);
             }
             if name.child("SURN").is_some() {
                 name.set_child_value("SURN", surname);
+            }
+            if name.child("NSFX").is_some() || !suffix.is_empty() && name.children.iter().any(|c| c.tag == "SURN" || c.tag == "GIVN") {
+                name.set_child_value("NSFX", suffix);
             }
         }
         if form.sex == Sex::Unknown && r.child("SEX").is_none() {
@@ -1207,11 +1213,7 @@ fn write_citation(r: &mut Node, c: &CitationForm, pointer: Option<String>) {
 
 fn summarize(r: &Node) -> PersonSummary {
     let (given, surname) = r.child("NAME").map(split_name).unwrap_or_default();
-    let suffix = r
-        .child("NAME")
-        .and_then(|n| n.value.splitn(3, '/').nth(2))
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
+    let suffix = r.child("NAME").map(name_suffix).unwrap_or_default();
     let mut display = [given.as_str(), surname.as_str(), suffix.as_str()]
         .iter()
         .filter(|s| !s.is_empty())
@@ -1242,6 +1244,12 @@ fn summarize(r: &Node) -> PersonSummary {
         is_dead,
         search,
     }
+}
+
+/// The suffix after `/Surname/`, or the `NSFX` part when the name has none.
+pub fn name_suffix(name: &Node) -> String {
+    let suffix = name.value.splitn(3, '/').nth(2).unwrap_or("").trim();
+    if suffix.is_empty() { name.child_value("NSFX").trim().to_string() } else { suffix.to_string() }
 }
 
 /// Splits `Given /Surname/ Suffix` into (given, surname).
@@ -1522,6 +1530,36 @@ mod tests {
         assert_eq!(views[0].fact, "Name");
         assert_eq!(views[1].fact, "Birth · 1850");
         assert_eq!(views[1].title, "Parish register");
+    }
+
+    #[test]
+    fn name_suffix_is_editable() {
+        let src = "0 HEAD\r\n0 @I1@ INDI\r\n1 NAME Eugene /Henshaw/ Jr\r\n2 GIVN Eugene\r\n2 SURN Henshaw\r\n2 NSFX Jr\r\n0 @I2@ INDI\r\n1 NAME Ann /Lee/\r\n2 GIVN Ann\r\n2 SURN Lee\r\n0 TRLR\r\n";
+        let (mut doc, _) = Document::from_bytes(src.as_bytes());
+        let form = doc.form_for("I1");
+        assert_eq!((form.given.as_str(), form.suffix.as_str()), ("Eugene", "Jr"));
+        assert_eq!(doc.person("I1").unwrap().display, "Eugene Henshaw Jr");
+
+        let before = doc.to_gedcom();
+        doc.mutate(|d| d.apply_form("I1", &form));
+        assert_eq!(doc.to_gedcom(), before, "unchanged save is lossless");
+
+        let mut sr = form.clone();
+        sr.suffix = "Sr".into();
+        doc.mutate(|d| d.apply_form("I1", &sr));
+        assert!(doc.to_gedcom().contains("1 NAME Eugene /Henshaw/ Sr\r\n2 GIVN Eugene\r\n2 SURN Henshaw\r\n2 NSFX Sr\r\n"));
+
+        let mut none = sr.clone();
+        none.suffix.clear();
+        doc.mutate(|d| d.apply_form("I1", &none));
+        let text = doc.to_gedcom();
+        assert!(text.contains("1 NAME Eugene /Henshaw/\r\n2 GIVN Eugene\r\n2 SURN Henshaw\r\n0 @I2@"), "{text}");
+        assert_eq!(doc.person("I1").unwrap().display, "Eugene Henshaw");
+
+        let mut ann = doc.form_for("I2");
+        ann.suffix = "III".into();
+        doc.mutate(|d| d.apply_form("I2", &ann));
+        assert!(doc.to_gedcom().contains("1 NAME Ann /Lee/ III\r\n2 GIVN Ann\r\n2 SURN Lee\r\n2 NSFX III\r\n"));
     }
 
     /// `GENIE_GED=path/to/file.ged cargo test -- --ignored real_file`

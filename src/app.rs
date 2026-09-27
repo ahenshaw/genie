@@ -148,6 +148,7 @@ pub struct GenieApp {
 
 impl GenieApp {
     pub fn new(cc: &eframe::CreationContext<'_>, open: Option<PathBuf>) -> Self {
+        let mut last_open = None;
         let mut app = Self {
             doc: None,
             theme: BuiltInTheme::Slate,
@@ -197,11 +198,14 @@ impl GenieApp {
             if let Some(r) = storage.get_string("recent") {
                 app.recent = r.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect();
             }
+            last_open = storage.get_string("last_open").filter(|p| !p.is_empty()).map(PathBuf::from);
         }
         app.theme.theme().install(&cc.egui_ctx);
         crate::fonts::install(&cc.egui_ctx);
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        if let Some(path) = open {
+        // Reopen whatever file was open when Genie last quit, unless one was
+        // named on the command line or the file has since gone away.
+        if let Some(path) = open.or(last_open.filter(|p| p.is_file())) {
             app.load_path(&cc.egui_ctx, &path);
         }
         app
@@ -216,6 +220,8 @@ impl GenieApp {
             .find(|r| r.tag == "INDI")
             .and_then(|r| r.xref.clone());
         self.home = doc.path.as_deref().and_then(|p| self.homes.get(&path_key(p))).cloned();
+        // Start on the home person when the file has one, else the first person.
+        let first = self.home.clone().filter(|h| doc.person(h).is_some()).or(first);
         self.relation = RelationView::default();
         self.media_ui = MediaUi::default();
         self.tools = ToolsUi::default();
@@ -1251,7 +1257,10 @@ impl GenieApp {
             .show(ctx, |ui| {
                 let footer_h = 60.0;
                 let body_h = (ui.available_height() - footer_h).max(0.0);
-                ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), body_h), Layout::top_down(Align::Min), |ui| {
+                // Wide form rows can stretch the drawer's layout; pin the footer
+                // to the drawer's own width so its buttons stay on screen.
+                let width = ui.available_width();
+                ui.allocate_ui_with_layout(egui::vec2(width, body_h), Layout::top_down(Align::Min), |ui| {
                     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                         ui.spacing_mut().item_spacing.y = 8.0;
                         if can_link {
@@ -1308,22 +1317,19 @@ impl GenieApp {
                 });
                 ui.separator();
                 ui.add_space(4.0);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let label = match (&ed.mode, ed.source) {
-                            (EditMode::Existing(_), _) => "Save changes".to_string(),
-                            (EditMode::New(Some((_, rel))), 1) => format!("Link as {}", rel.label().to_lowercase()),
-                            (EditMode::New(Some((_, rel))), _) => format!("Add {}", rel.label().to_lowercase()),
-                            (EditMode::New(None), _) => "Add person".to_string(),
-                        };
-                        if ui.add(Button::new(label).accent(Accent::Green)).clicked() {
-                            save = true;
-                        }
-                        if ui.add(Button::new("Cancel").outline()).clicked() {
-                            cancel = true;
-                        }
-                        ui.label(RichText::new("Ctrl+Enter").size(11.0).color(Theme::current(ui.ctx()).palette.text_faint));
-                    });
+                ui.allocate_ui_with_layout(egui::vec2(width, 36.0), Layout::right_to_left(Align::Center), |ui| {
+                    let label = match (&ed.mode, ed.source) {
+                        (EditMode::Existing(_), _) => "Save changes".to_string(),
+                        (EditMode::New(Some((_, rel))), 1) => format!("Link as {}", rel.label().to_lowercase()),
+                        (EditMode::New(Some((_, rel))), _) => format!("Add {}", rel.label().to_lowercase()),
+                        (EditMode::New(None), _) => "Add person".to_string(),
+                    };
+                    if ui.add(Button::new(label).accent(Accent::Green)).on_hover_text("Ctrl+Enter").clicked() {
+                        save = true;
+                    }
+                    if ui.add(Button::new("Cancel").outline()).clicked() {
+                        cancel = true;
+                    }
                 });
             });
         if ctx.input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::COMMAND, Key::Enter))) {
@@ -1351,6 +1357,9 @@ fn person_form(ui: &mut Ui, form: &mut PersonForm, focus: &mut bool, places: &[(
             }
         }
         cols[1].add(TextInput::new(&mut form.surname).label("Surname").hint("Family name").id_salt("f_surname"));
+    });
+    ui.columns(2, |cols| {
+        cols[0].add(TextInput::new(&mut form.suffix).label("Suffix").hint("e.g. Jr, Sr, III").id_salt("f_suffix"));
     });
     ui.label(RichText::new("Sex").size(12.0).color(p.text_muted));
     let mut sex_idx = match form.sex {
@@ -1535,6 +1544,8 @@ impl eframe::App for GenieApp {
         storage.set_string("graph_links", self.graph.mode().label().to_string());
         let recent: Vec<String> = self.recent.iter().map(|p| p.display().to_string()).collect();
         storage.set_string("recent", recent.join("\n"));
+        let last_open = self.doc.as_ref().and_then(|d| d.path.as_ref());
+        storage.set_string("last_open", last_open.map(|p| p.display().to_string()).unwrap_or_default());
     }
 }
 
