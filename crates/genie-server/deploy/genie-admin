@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+#
+# genie-server's command-line tools, with its settings loaded:
+#
+#   sudo genie-admin create-admin <username>
+#   sudo genie-admin reset-password <username>
+#   sudo genie-admin migrate
+set -euo pipefail
+if [[ $EUID -ne 0 ]]; then
+  exec sudo "$0" "$@"
+fi
+set -a
+# shellcheck disable=SC1091
+. /opt/genie-server/.env
+set +a
+exec /opt/genie-server/genie-server "$@"

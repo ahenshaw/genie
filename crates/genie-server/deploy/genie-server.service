@@ -1,0 +1,27 @@
+[Unit]
+Description=Genie family tree API (genie.henshaw.us)
+After=network.target mysql.service
+
+[Service]
+Type=exec
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/genie-server
+EnvironmentFile=/opt/genie-server/.env
+ExecStart=/opt/genie-server/genie-server
+Restart=on-failure
+RestartSec=2
+
+# Reads its own directory, writes only the documents, and reaches MySQL
+# over loopback.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/genie
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target

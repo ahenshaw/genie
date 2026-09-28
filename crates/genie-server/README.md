@@ -63,3 +63,54 @@ GENIE_TEST_MYSQL=mysql://root:genie-test@127.0.0.1:33306 cargo test -p genie-ser
 
 Each test makes and drops its own database. Without `GENIE_TEST_MYSQL`, the database
 tests pass without running.
+
+## Deployment (genie.henshaw.us)
+
+It runs on the same VPS as tennis.henshaw.us (Ubuntu 22.04, Apache 2.4, MySQL 8.0).
+Apache terminates TLS and proxies everything to `127.0.0.1:3100`.
+
+```
+/opt/genie-server/genie-server                  release binary
+/opt/genie-server/.env                          DATABASE_URL, SESSION_SECRET, …; mode 600, root
+/var/lib/genie/media/                           documents, <sha256> files; www-data
+/etc/systemd/system/genie-server.service        runs as www-data, writes only /var/lib/genie
+/etc/apache2/sites-available/genie.henshaw.us.conf          :80, redirects to HTTPS
+/etc/apache2/sites-available/genie.henshaw.us-le-ssl.conf   :443, written by certbot
+/usr/local/bin/genie-admin                      the CLI with .env loaded
+```
+
+MySQL has a `genie` database. Its `genie` account can connect from localhost only.
+
+**Deploying a new build.** sudo on the VPS asks for a password, so this is two steps:
+
+```sh
+crates/genie-server/deploy/deploy.sh          # build, check glibc, stage to ~/deploy-genie-server/
+ssh -t tennis.henshaw.us 'sudo bash ~/deploy-genie-server/install.sh'
+```
+
+`install.sh` is safe to rerun.
+
+- **First run:** it creates the database, its account (asking for the MySQL root
+  password if root has one), `.env` with fresh secrets, the Apache site and the
+  certificate.
+- **Every run:** it backs up the binary, restarts the service, and checks that it
+  answers. If it doesn't, it restores the previous binary.
+
+**Accounts from the command line:**
+
+```sh
+ssh -t tennis.henshaw.us 'sudo genie-admin create-admin <username>'
+ssh -t tennis.henshaw.us 'sudo genie-admin reset-password <username>'
+```
+
+**Backups.** Everything that matters is in the `genie` database and in
+`/var/lib/genie/media`. The database includes every revision and who made it. Back up
+both, e.g. nightly from root's crontab:
+
+```sh
+mysqldump --single-transaction genie | gzip > /var/backups/genie-$(date +%F).sql.gz
+rsync -a /var/lib/genie/media/ /var/backups/genie-media/
+```
+
+**Signing everyone out:** change `SESSION_SECRET` in `.env`
+(`openssl rand -hex 32`), then `systemctl restart genie-server`.
