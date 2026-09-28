@@ -48,6 +48,7 @@ pub fn run(tree: PathBuf, port: u16, open_browser: bool) -> std::io::Result<()> 
     let app = Router::new()
         .route("/api/tree", get(get_tree).put(put_tree))
         .route("/api/files", get(get_files))
+        .route("/api/bundle", get(get_bundle))
         .route("/media/{*path}", get(get_media))
         .fallback(get(static_file))
         .layer(middleware::from_fn_with_state(state.clone(), local_only))
@@ -129,6 +130,33 @@ async fn get_files(State(state): State<AppState>) -> Response {
     let json = serde_json::to_vec(&list).unwrap_or_default();
     *state.media.lock().unwrap() = files;
     ([(header::CONTENT_TYPE, "application/json"), (header::CACHE_CONTROL, "no-store")], json).into_response()
+}
+
+/// The saved tree and its documents as a `.gdz` download.
+async fn get_bundle(State(state): State<AppState>) -> Response {
+    let bytes = match read_tree(&state).await {
+        Ok(b) => b,
+        Err(r) => return r,
+    };
+    let tree = state.tree.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        let (mut doc, _) = Document::from_bytes(&bytes);
+        doc.path = Some(tree);
+        let mut out = std::io::Cursor::new(Vec::new());
+        crate::bundle::write(&doc, &mut out).map(|_| out.into_inner())
+    })
+    .await;
+    let zip = match built {
+        Ok(Ok(z)) => z,
+        Ok(Err(e)) => return error(StatusCode::INTERNAL_SERVER_ERROR, format!("Couldn't build the bundle: {e}")),
+        Err(e) => return error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    };
+    let stem = state.tree.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Tree".into());
+    // A plain-ASCII fallback name, plus the real one (RFC 6266).
+    let ascii: String = stem.chars().map(|c| if c.is_ascii_alphanumeric() || " -_().".contains(c) { c } else { '_' }).collect();
+    let encoded: String = stem.bytes().map(|b| if b.is_ascii_alphanumeric() { (b as char).to_string() } else { format!("%{b:02X}") }).collect();
+    let disposition = format!("attachment; filename=\"{ascii}.gdz\"; filename*=UTF-8''{encoded}.gdz");
+    ([(header::CONTENT_TYPE, "application/zip".to_string()), (header::CONTENT_DISPOSITION, disposition)], zip).into_response()
 }
 
 /// Saves the tree: to a temporary file first, so a failed write can't

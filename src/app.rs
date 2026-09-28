@@ -72,6 +72,8 @@ pub enum Action {
     Sample,
     Save,
     SaveAs,
+    /// Write the tree and its documents to a `.gdz` bundle.
+    ExportBundle,
     Close,
     Undo,
     Redo,
@@ -255,6 +257,10 @@ impl GenieApp {
     }
 
     fn load_path(&mut self, ctx: &egui::Context, path: &Path) {
+        if is_bundle(path) {
+            self.open_bundle(ctx, path);
+            return;
+        }
         match std::fs::read(path) {
             Ok(bytes) => {
                 self.open_bytes(ctx, path, &bytes);
@@ -266,6 +272,55 @@ impl GenieApp {
                     .tone(BadgeTone::Danger)
                     .description(format!("{}: {e}", path.display()))
                     .show(ctx);
+            }
+        }
+    }
+
+    /// Unpacks a bundle into a folder the user picks, then opens the tree.
+    fn open_bundle(&mut self, ctx: &egui::Context, bundle: &Path) {
+        let Some(parent) = platform::pick_folder("Where should the tree and its documents go?") else { return };
+        match crate::bundle::import(bundle, &parent) {
+            Ok(tree) => {
+                self.load_path(ctx, &tree);
+                let folder = tree.parent().map(|d| d.display().to_string()).unwrap_or_default();
+                Toast::new(format!("Unpacked {}", file_label(bundle))).tone(BadgeTone::Ok).description(format!("Into {folder}")).show(ctx);
+            }
+            Err(e) => {
+                Toast::new("Couldn't open the bundle").tone(BadgeTone::Danger).description(e).show(ctx);
+            }
+        }
+    }
+
+    fn export_bundle(&mut self, ctx: &egui::Context) {
+        let Some(doc) = self.doc.as_ref() else { return };
+        if platform::WEB {
+            // The server bundles the tree as saved.
+            if doc.dirty {
+                Toast::new("Bundling the last saved version").tone(BadgeTone::Warning).description("Save first to include your latest changes.").show(ctx);
+            }
+            platform::open_url(ctx, "/api/bundle");
+            return;
+        }
+        let stem = Path::new(&doc.file_name()).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Tree".into());
+        let dir = doc.path.as_ref().and_then(|p| p.parent());
+        let Some(mut dest) = platform::save_bundle(dir, &format!("{stem}.{}", crate::bundle::EXTENSION)) else { return };
+        if dest.extension().is_none() {
+            dest.set_extension(crate::bundle::EXTENSION);
+        }
+        match crate::bundle::export(doc, &dest) {
+            Ok(s) => {
+                let files = format!("{} document{}", s.files, if s.files == 1 { "" } else { "s" });
+                Toast::new(format!("Exported {}", file_label(&dest))).tone(BadgeTone::Ok).description(format!("The tree and {files}.")).show(ctx);
+                if !s.missing.is_empty() {
+                    let n = s.missing.len();
+                    Toast::new(format!("{n} document{} left out", if n == 1 { "" } else { "s" }))
+                        .tone(BadgeTone::Warning)
+                        .description(format!("Their files weren't found, starting with {}.", s.missing[0]))
+                        .show(ctx);
+                }
+            }
+            Err(e) => {
+                Toast::new("Export failed").tone(BadgeTone::Danger).description(e.to_string()).show(ctx);
             }
         }
     }
@@ -908,6 +963,7 @@ impl GenieApp {
                 Action::SaveAs => {
                     self.save(ctx, true);
                 }
+                Action::ExportBundle => self.export_bundle(ctx),
                 Action::Undo => {
                     if self.doc.as_mut().is_some_and(|d| d.undo()) {
                         self.fix_selection();
@@ -978,6 +1034,11 @@ impl GenieApp {
                     if ui.add(MenuItem::new("Save").icon(glyphs::SAVE.to_string()).shortcut("Ctrl S").enabled(has_doc)).clicked() {
                         acts.push(Action::Save);
                     }
+                    ui.separator();
+                    let item = ui.add(MenuItem::new("Download bundle").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc));
+                    if item.on_hover_text("The saved tree and its documents in one .gdz file").clicked() {
+                        acts.push(Action::ExportBundle);
+                    }
                     return;
                 }
                 if ui.add(MenuItem::new("New tree").icon(glyphs::PLUS.to_string()).shortcut("Ctrl N")).clicked() {
@@ -1002,6 +1063,10 @@ impl GenieApp {
                 }
                 if ui.add(MenuItem::new("Save as…").shortcut("Ctrl Shift S").enabled(has_doc)).clicked() {
                     acts.push(Action::SaveAs);
+                }
+                let item = ui.add(MenuItem::new("Export bundle…").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc));
+                if item.on_hover_text("The tree and its documents in one .gdz file, to open on another computer").clicked() {
+                    acts.push(Action::ExportBundle);
                 }
                 ui.separator();
                 if ui.add(MenuItem::new("Close").enabled(has_doc)).clicked() {
@@ -1168,7 +1233,7 @@ impl GenieApp {
                     let drop = FileDropZone::new()
                         .prompt("Drop a GEDCOM file here")
                         .action_word("browse")
-                        .hint(".ged files from Ancestry, FamilySearch, Gramps, RootsMagic, …")
+                        .hint(".ged files from Ancestry, FamilySearch, Gramps, RootsMagic, … or a .gdz bundle")
                         .min_height(150.0)
                         .show(ui);
                     if drop.response.clicked() {
@@ -1539,6 +1604,10 @@ fn path_key(p: &Path) -> String {
     p.canonicalize().unwrap_or_else(|_| p.to_path_buf()).display().to_string()
 }
 
+fn is_bundle(p: &Path) -> bool {
+    p.extension().is_some_and(|e| e.eq_ignore_ascii_case(crate::bundle::EXTENSION))
+}
+
 fn file_label(p: &Path) -> String {
     p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.display().to_string())
 }
@@ -1557,8 +1626,8 @@ impl eframe::App for GenieApp {
         }
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
         if self.doc.is_some() && !dropped.is_empty() {
-            let is_ged = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ged"));
-            let (trees, files): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(is_ged);
+            let is_tree = |p: &PathBuf| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("ged")) || is_bundle(p);
+            let (trees, files): (Vec<PathBuf>, Vec<PathBuf>) = dropped.into_iter().partition(is_tree);
             if let Some(path) = trees.into_iter().next() {
                 self.actions.push(Action::Open(Some(path)));
             } else {

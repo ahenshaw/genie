@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod app;
+mod bundle;
 mod dedup;
 mod fonts;
 mod gedcom;

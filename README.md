@@ -57,6 +57,7 @@ This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser`
 - **Get photos from WikiTree:** *Tools → Get photos from WikiTree…* asks for a WikiTree ID (for example `Henshaw-1012`), matches the WikiTree profiles around it to people in your tree, and lets you pick which photos to add. The photos are copied into the media folder and linked to each person.
 - **Set a home person:** right-click someone and choose *Set as home person*. Each profile then shows how that person is related to them.
 - **Print-style reports:** open the Reports section and pick a report. It follows the selected person; click a name in a report (or a slice of the fan chart) to switch to them, and use *Copy as text* to paste a report elsewhere.
+- **Move a tree to another computer:** *File → Export bundle…* writes the tree and all its documents into one `.gdz` file (the GEDZIP format from GEDCOM 7). Documents stored outside the tree's folder are included too, and any whose files can't be found are listed. On the other computer, open the `.gdz` with *File → Open…* (or drag it onto the window, or double-click it on Windows) and choose a folder: Genie unpacks it into a new folder there and opens the tree. In the browser, *File → Download bundle* downloads the saved tree the same way.
 - **Save:** Ctrl+S, or Ctrl+Shift+S to save as a new file.
 
 ## Sections

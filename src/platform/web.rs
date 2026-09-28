@@ -86,6 +86,10 @@ pub fn save_ged(_dir: Option<&Path>, _name: &str) -> Option<PathBuf> {
     None
 }
 
+pub fn save_bundle(_dir: Option<&Path>, _name: &str) -> Option<PathBuf> {
+    None
+}
+
 pub fn pick_media_files() -> Option<Vec<PathBuf>> {
     None
 }

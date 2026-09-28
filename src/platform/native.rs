@@ -30,11 +30,22 @@ pub fn set_unsaved(_unsaved: bool) {}
 // ---- dialogs -------------------------------------------------------------------------------
 
 pub fn pick_ged(dir: Option<&Path>) -> Option<PathBuf> {
-    let mut dialog = rfd::FileDialog::new().add_filter("GEDCOM", &["ged", "GED"]);
+    let mut dialog = rfd::FileDialog::new()
+        .add_filter("GEDCOM or bundle", &["ged", "GED", "gdz", "GDZ"])
+        .add_filter("GEDCOM", &["ged", "GED"])
+        .add_filter("Bundle with documents", &["gdz", "GDZ"]);
     if let Some(dir) = dir {
         dialog = dialog.set_directory(dir);
     }
     dialog.pick_file()
+}
+
+pub fn save_bundle(dir: Option<&Path>, name: &str) -> Option<PathBuf> {
+    let mut dialog = rfd::FileDialog::new().add_filter("Bundle with documents", &["gdz"]).set_file_name(name);
+    if let Some(dir) = dir {
+        dialog = dialog.set_directory(dir);
+    }
+    dialog.save_file()
 }
 
 pub fn save_ged(dir: Option<&Path>, name: &str) -> Option<PathBuf> {

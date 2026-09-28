@@ -51,6 +51,11 @@ Root: HKA; Subkey: "Software\Classes\.ged\OpenWithProgids"; ValueType: string; V
 Root: HKA; Subkey: "Software\Classes\Genie.GEDCOM"; ValueType: string; ValueName: ""; ValueData: "GEDCOM family tree"; Flags: uninsdeletekey
 Root: HKA; Subkey: "Software\Classes\Genie.GEDCOM\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\genie.exe,0"
 Root: HKA; Subkey: "Software\Classes\Genie.GEDCOM\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\genie.exe"" ""%1"""
+; .gdz bundles (a tree with its documents) are Genie's own export, so open them with Genie.
+Root: HKA; Subkey: "Software\Classes\.gdz"; ValueType: string; ValueName: ""; ValueData: "Genie.Bundle"; Flags: uninsdeletevalue
+Root: HKA; Subkey: "Software\Classes\Genie.Bundle"; ValueType: string; ValueName: ""; ValueData: "Genie family tree bundle"; Flags: uninsdeletekey
+Root: HKA; Subkey: "Software\Classes\Genie.Bundle\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\genie.exe,0"
+Root: HKA; Subkey: "Software\Classes\Genie.Bundle\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\genie.exe"" ""%1"""
 ; Only when asked: make Genie the default for .ged.
 Root: HKA; Subkey: "Software\Classes\.ged"; ValueType: string; ValueName: ""; ValueData: "Genie.GEDCOM"; Flags: uninsdeletevalue; Tasks: gedassoc
 
