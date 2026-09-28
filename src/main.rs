@@ -12,6 +12,7 @@ mod minimap;
 mod model;
 mod platform;
 mod relation;
+mod reports;
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
 mod tidy;

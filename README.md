@@ -56,6 +56,7 @@ This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser`
 - **Clean up an imported tree:** *Tools → Find duplicate people…* lists people who may have been entered twice and lets you compare and merge them; *Find duplicate sources…* merges repeated sources.
 - **Get photos from WikiTree:** *Tools → Get photos from WikiTree…* asks for a WikiTree ID (for example `Henshaw-1012`), matches the WikiTree profiles around it to people in your tree, and lets you pick which photos to add. The photos are copied into the media folder and linked to each person.
 - **Set a home person:** right-click someone and choose *Set as home person*. Each profile then shows how that person is related to them.
+- **Print-style reports:** open the Reports section and pick a report. It follows the selected person; click a name in a report (or a slice of the fan chart) to switch to them, and use *Copy as text* to paste a report elsewhere.
 - **Save:** Ctrl+S, or Ctrl+Shift+S to save as a new file.
 
 ## Sections
@@ -67,6 +68,7 @@ This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser`
 | Relationship | The line of descent connecting two people, and what the relationship is called |
 | Media    | Every document and photo in the tree, with filters for unattached and missing files |
 | Graph    | People and families as connected nodes that can be edited by wiring them together, either through family nodes or directly from parent to child |
+| Reports  | Descendancy, Register and Ahnentafel reports, a family group sheet, and a fan chart of ancestors, for the selected person; names link to the people, and text reports can be copied |
 | Overview | Counts, common surnames and places, and people missing key details |
 | GEDCOM   | The selected person's records as they will be saved |
 
@@ -84,7 +86,7 @@ This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser`
 | Ctrl+Enter | Save in the editor |
 | Alt+← / Alt+→ | Back / Forward |
 | Alt+Home | Go to the home person |
-| Ctrl+1 … Ctrl+7 | Switch section |
+| Ctrl+1 … Ctrl+8 | Switch section |
 
 In the Tree view, drag to pan and Ctrl+scroll to zoom.
 

@@ -15,6 +15,7 @@ use crate::model::{self, CitationForm, CiteSource, Document, FactKey, PersonForm
 use crate::mediaview::MediaUi;
 use crate::platform::{self, ServerEvent};
 use crate::relation::RelationView;
+use crate::reports::ReportsView;
 use crate::tools::ToolsUi;
 use crate::tree::TreeView;
 use crate::views;
@@ -22,13 +23,14 @@ use crate::widgets::{self, section_label};
 
 const SAMPLE: &[u8] = include_bytes!("sample.ged");
 const MAX_RECENT: usize = 10;
-pub const TABS: [&str; 7] = ["Profile", "Tree", "Relationship", "Graph", "Media", "Overview", "GEDCOM"];
+pub const TABS: [&str; 8] = ["Profile", "Tree", "Relationship", "Graph", "Media", "Reports", "Overview", "GEDCOM"];
 pub const TAB_PROFILE: usize = 0;
 pub const TAB_TREE: usize = 1;
 pub const TAB_RELATION: usize = 2;
 pub const TAB_GRAPH: usize = 3;
 pub const TAB_MEDIA: usize = 4;
-pub const TAB_OVERVIEW: usize = 5;
+pub const TAB_REPORTS: usize = 5;
+pub const TAB_OVERVIEW: usize = 6;
 
 /// Something a view asks the app to do once the frame's UI is drawn.
 #[derive(Clone, Debug)]
@@ -127,6 +129,7 @@ pub struct GenieApp {
     tree: TreeView,
     graph: FamilyGraph,
     relation: RelationView,
+    reports: ReportsView,
     media_ui: MediaUi,
     tools: ToolsUi,
     /// Pairs marked "not duplicates", per file, remembered between runs.
@@ -170,6 +173,7 @@ impl GenieApp {
             tree: TreeView::default(),
             graph: FamilyGraph::new(),
             relation: RelationView::default(),
+            reports: ReportsView::default(),
             media_ui: MediaUi::default(),
             tools: ToolsUi::default(),
             not_dupes: HashMap::new(),
@@ -726,7 +730,7 @@ impl GenieApp {
                 && let Some(x) = &self.selected {
                     self.actions.push(Action::Edit(x.clone()));
                 }
-            for (i, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7].into_iter().enumerate() {
+            for (i, key) in [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8].into_iter().enumerate() {
                 if consume(cmd, key) {
                     self.actions.push(Action::SetTab(i));
                 }
@@ -1607,6 +1611,7 @@ impl eframe::App for GenieApp {
                             TAB_RELATION => self.relation.show(ui, &doc, self.selected.as_deref(), home.as_deref(), &mut self.actions),
                             TAB_GRAPH => self.graph.show(ui, &mut doc, self.selected.as_deref(), &mut self.actions),
                             TAB_MEDIA => self.media_ui.section(ui, &doc, &mut self.actions),
+                            TAB_REPORTS => self.reports.show(ui, &doc, self.selected.as_deref(), &mut self.actions),
                             TAB_OVERVIEW => views::overview(ui, &doc, &self.load_notes, &mut self.actions),
                             _ => views::source(ui, &doc, self.selected.as_deref(), &mut self.actions),
                         }
