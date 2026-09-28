@@ -252,6 +252,18 @@ impl Document {
         (d, notes)
     }
 
+    /// A document from already-parsed records, as [`Document::from_bytes`]
+    /// would make it: without TRLR, and with a HEAD.
+    pub fn from_records(mut records: Vec<Node>) -> Self {
+        records.retain(|r| r.tag != "TRLR");
+        if !records.iter().any(|r| r.tag == "HEAD") {
+            records.insert(0, Self::new_empty().records.remove(0));
+        }
+        let mut d = Self { records, ..Default::default() };
+        d.rebuild();
+        d
+    }
+
     pub fn to_gedcom(&self) -> String {
         let mut recs = self.records.clone();
         if let Some(head) = recs.iter_mut().find(|r| r.tag == "HEAD") {

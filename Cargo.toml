@@ -6,7 +6,7 @@ edition = "2024"
 # The app is the root package; the tree model it shares with the server is a
 # library of its own.
 [workspace]
-members = ["crates/genie-core"]
+members = ["crates/genie-core", "crates/genie-server"]
 
 [dependencies]
 genie-core = { path = "crates/genie-core" }

@@ -29,7 +29,7 @@ pub struct ExportSummary {
 
 /// A path as written in `FILE`, if it can go into the bundle unchanged:
 /// relative, and staying inside the tree's folder.
-fn safe_relative(file: &str) -> Option<String> {
+pub fn safe_relative(file: &str) -> Option<String> {
     let f = file.trim().trim_start_matches("file://").replace('\\', "/");
     if f.is_empty() || f.starts_with('/') || f.chars().nth(1) == Some(':') {
         return None;

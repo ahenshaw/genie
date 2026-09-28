@@ -1,0 +1,65 @@
+# genie-server
+
+The API behind genie.henshaw.us. It serves one shared family tree to people who sign
+in:
+
+- Editors' changes are merged, and each change is recorded against whoever made it.
+- Guests see only people who have died.
+
+The desktop app talks to this server over HTTPS; the browser version will later too.
+MySQL is reached only by this server, over loopback, and never from outside.
+
+## Roles
+
+| Role | Sees | Can |
+|---|---|---|
+| admin | everything | edit, manage accounts, import a `.gdz` |
+| editor | everything | edit, upload documents |
+| family | everything | read only |
+| guest | the deceased; living people as "Private" | read only |
+
+## API (JSON, under `/api`, `Authorization: Bearer <token>`)
+
+| Endpoint | Who | What |
+|---|---|---|
+| `POST /login` `{username, password}` | anyone | → `{token, expires_at, user}`. Five wrong passwords lock the username or address for 15 minutes. |
+| `POST /logout` | signed in | ends every session of the account |
+| `GET /me` | signed in | the account |
+| `POST /password` `{current, new}` | signed in | → a new token; other sessions end |
+| `GET /tree` | signed in | `{revision, role, gedcom}`: guests get the guest view. `If-None-Match: "rev-N"` → 304 |
+| `POST /tree` `{base_revision, gedcom, resolve?}` | editor | Others' changes since `base_revision` are merged in. Returns `{revision, merged, gedcom?, renamed, changes}`, or 409 `{conflicts: [{xref, kind, label, changed_by}]}`. Resubmit with `resolve: {"I12": "mine" \| "theirs"}`. |
+| `GET /changes?since=N` / `?xref=I12` | signed in | who changed what, newest first (guests: deceased records only) |
+| `GET /media` | signed in | `[{path, sha256, size}]` for documents the caller's view links to |
+| `GET /media/{sha256}` | signed in | the file, if the caller's view links to it; otherwise 404 |
+| `PUT /media?path=…` | editor | stores the body as the document at that path |
+| `POST /import[?replace=true]` | admin | the body is a `.gdz`: replaces the tree (a new revision) and adds its documents |
+| `GET /users`, `POST /users`, `PATCH /users/{id}` | admin | list, create `{username, display_name, password, role}`, change `{display_name?, role?, disabled?, password?}` |
+
+Changing an account's role, password or disabled flag ends its sessions. The last
+active admin can't be demoted or disabled.
+
+## Settings (environment or `.env`)
+
+| Variable | Default | |
+|---|---|---|
+| `DATABASE_URL` | (required) | `mysql://genie:PASSWORD@127.0.0.1:3306/genie` |
+| `SESSION_SECRET` | (required) | at least 32 characters; paste the output of `openssl rand -hex 32` |
+| `BIND_ADDR` | `127.0.0.1:3100` | |
+| `MEDIA_DIR` | `/var/lib/genie/media` | documents, as `<sha256>` files |
+| `LIVING_YEARS` | `100` | born this long ago counts as deceased for guests |
+
+The schema is applied at startup.
+
+- `genie-server create-admin <username>` adds the first administrator. It asks for a
+  password.
+- `genie-server reset-password <username>` sets a new one.
+
+## Developing
+
+```sh
+docker run -d --name genie-test-mysql -e MYSQL_ROOT_PASSWORD=genie-test -p 127.0.0.1:33306:3306 mysql:8.4
+GENIE_TEST_MYSQL=mysql://root:genie-test@127.0.0.1:33306 cargo test -p genie-server
+```
+
+Each test makes and drops its own database. Without `GENIE_TEST_MYSQL`, the database
+tests pass without running.
