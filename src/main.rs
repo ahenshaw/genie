@@ -91,5 +91,7 @@ fn main() {
         if let Err(e) = started {
             web_sys::console::error_1(&e);
         }
+        // Only now does the hidden input the keyboard types into exist.
+        platform::prepare_touch_keyboard("genie_canvas");
     });
 }

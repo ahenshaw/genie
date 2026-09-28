@@ -134,6 +134,46 @@ impl egui::load::BytesLoader for MediaLoader {
     }
 }
 
+thread_local! {
+    /// The last frame had the pointer over a text field.
+    static OVER_TEXT: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Notes, at the end of each frame, whether the pointer is over a text
+/// field (egui gives it the text cursor), for [`prepare_touch_keyboard`].
+pub fn end_frame(ctx: &egui::Context) {
+    OVER_TEXT.set(ctx.output(|o| o.cursor_icon == egui::CursorIcon::Text));
+}
+
+/// Makes the on-screen keyboard of an iPad or phone work with the app.
+///
+/// egui types through a hidden `<input>` that eframe puts beside the canvas.
+/// iOS only opens the keyboard when that input is focused *during* a tap,
+/// but egui gives a text field focus in the frame after the tap ends, so on
+/// its own the keyboard needs a second tap. A tap starts with `touchstart`,
+/// which egui draws a frame for, hovering the field under the finger; so if
+/// that frame had the pointer over a text field, the input is focused here,
+/// as the finger lifts, before eframe's own handler.
+///
+/// Also turns off autocorrect and the like on the input: they rewrite what
+/// is typed without showing it, which silently spoils passwords.
+pub fn prepare_touch_keyboard(canvas_id: &str) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+    let Ok(Some(input)) = document.query_selector(&format!("#{canvas_id} + input")) else { return };
+    for (name, value) in [("autocorrect", "off"), ("autocapitalize", "off"), ("autocomplete", "off"), ("spellcheck", "false")] {
+        let _ = input.set_attribute(name, value);
+    }
+    let Ok(input) = input.dyn_into::<web_sys::HtmlElement>() else { return };
+    let focus = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+        if OVER_TEXT.get() {
+            let _ = input.focus();
+        }
+    });
+    // Capture phase: before eframe's handler, which looks at the focus.
+    let _ = document.add_event_listener_with_callback_and_bool("touchend", focus.as_ref().unchecked_ref(), true);
+    focus.forget();
+}
+
 pub fn install_loaders(ctx: &egui::Context) {
     ctx.add_bytes_loader(std::sync::Arc::new(MediaLoader::default()));
 }

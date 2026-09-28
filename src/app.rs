@@ -2188,6 +2188,7 @@ impl eframe::App for GenieApp {
             }
         }
         self.update_title(&ctx);
+        platform::end_frame(&ctx);
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

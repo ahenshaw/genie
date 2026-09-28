@@ -37,6 +37,9 @@ pub fn set_hosted_media(_files: Vec<(String, String)>) {}
 
 pub fn install_loaders(_ctx: &egui::Context) {}
 
+/// Touch keyboards are a browser matter.
+pub fn end_frame(_ctx: &egui::Context) {}
+
 // ---- dialogs -------------------------------------------------------------------------------
 
 pub fn pick_ged(dir: Option<&Path>) -> Option<PathBuf> {
