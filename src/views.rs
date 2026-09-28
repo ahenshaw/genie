@@ -5,14 +5,14 @@ use std::sync::Arc;
 
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, RichText, Sense, Stroke, Ui, pos2, vec2};
 use elegance::{
-    Accent, Avatar, AvatarSize, Badge, BadgeTone, Button, ButtonSize, Card, ContextMenu, Menu, MenuItem,
+    Accent, Badge, BadgeTone, Button, ButtonSize, Card, ContextMenu, Menu, MenuItem,
     ProgressBar, SegmentedControl, SegmentedSize, StatCard, Theme, glyphs,
 };
 
 use crate::app::{Action, TAB_GRAPH, TAB_RELATION, TAB_TREE};
 use crate::gedcom;
 use crate::model::{Document, Relation, Sex};
-use crate::widgets::{add_chip, fit_text, mix, muted, paint_avatar, person_chip, section_label, sex_tone};
+use crate::widgets::{add_chip, fit_text, mix, muted, paint_avatar, person_chip, section_label};
 
 const ROW_H: f32 = 50.0;
 
@@ -310,12 +310,8 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
         // Hero.
         Card::new().padding(20.0).show(ui, |ui| {
             ui.horizontal(|ui| {
-                if person.photos.iter().any(|f| crate::widgets::media_uri(ui.ctx(), f).is_some()) {
-                    let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
-                    paint_avatar(ui, rect.center(), 32.0, person);
-                } else {
-                    ui.add(Avatar::new(person.initials()).size(AvatarSize::XLarge).tone(sex_tone(person.sex)).surface(p.card));
-                }
+                let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
+                paint_avatar(ui, rect.center(), 32.0, person);
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     // Leave room for the Edit / Add relative / ⋯ buttons on the right.

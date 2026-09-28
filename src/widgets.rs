@@ -1,23 +1,16 @@
 //! Small painted building blocks shared by the views.
 
 use egui::{Align2, Color32, CornerRadius, FontId, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
-use elegance::{AvatarTone, Palette, Theme};
+use elegance::{Palette, Theme};
 
 use crate::model::{Document, PersonSummary, Sex};
 
 pub fn sex_color(p: &Palette, sex: Sex) -> Color32 {
     match sex {
         Sex::Male => p.blue,
-        Sex::Female => p.purple,
+        // Purple nudged toward pink.
+        Sex::Female => mix(p.purple, p.red, 0.25),
         Sex::Unknown => p.text_faint,
-    }
-}
-
-pub fn sex_tone(sex: Sex) -> AvatarTone {
-    match sex {
-        Sex::Male => AvatarTone::Sky,
-        Sex::Female => AvatarTone::Purple,
-        Sex::Unknown => AvatarTone::Neutral,
     }
 }
 
