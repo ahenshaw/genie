@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, channel};
 use egui::{Align, Layout, RichText, Ui};
 use elegance::{Accent, BadgeTone, Button, ButtonSize, Modal, Select, Switch, TextInput, Theme, Toast, glyphs};
 
-use crate::remote::{self, Account, Conflict, Event, Remote, Role};
+use crate::remote::{self, Account, Conflict, Remote, Role};
 use crate::widgets::{muted, section_label};
 
 /// What a dialog asks the app to do.
@@ -34,6 +34,9 @@ pub struct RemoteUi {
 
 struct ConnectDialog {
     open: bool,
+    /// In the browser: signing in to the page's own server, for a cookie;
+    /// there's nothing to show until then, so it can't be closed.
+    web: bool,
     server: String,
     username: String,
     password: String,
@@ -81,7 +84,14 @@ impl RemoteUi {
     pub fn open_connect(&mut self, server: &str, username: &str, reason: Option<String>) {
         self.connect = Some(ConnectDialog {
             open: true,
-            server: if server.is_empty() { remote::DEFAULT_SERVER.to_string() } else { server.to_string() },
+            web: crate::platform::WEB,
+            server: if crate::platform::WEB {
+                crate::platform::origin()
+            } else if server.is_empty() {
+                remote::DEFAULT_SERVER.to_string()
+            } else {
+                server.to_string()
+            },
             username: username.to_string(),
             password: String::new(),
             reason,
@@ -155,17 +165,28 @@ impl RemoteUi {
         }
         let waiting = d.waiting.is_some();
         let mut submit = false;
+        let web = d.web;
+        let (heading, subtitle) = if web {
+            (format!("Sign in to {}", remote::host_of(&d.server)), "The family tree you share".to_string())
+        } else {
+            ("Connect to a shared tree".to_string(), "Sign in to a Genie server to work on the family tree you share".to_string())
+        };
         Modal::new("connect", &mut d.open)
-            .heading("Connect to a shared tree")
-            .subtitle("Sign in to a Genie server to work on the family tree you share")
+            .heading(heading)
+            .subtitle(subtitle)
             .header_icon(glyphs::HOME.to_string())
+            .closable(!web)
+            .close_on_backdrop(!web)
+            .close_on_escape(!web)
             .max_width(440.0)
             .show(ctx, |ui| {
                 if let Some(r) = &d.reason {
                     ui.label(RichText::new(r).color(Theme::current(ui.ctx()).palette.amber));
                     ui.add_space(6.0);
                 }
-                ui.add(TextInput::new(&mut d.server).label("Server").hint("https://genie.henshaw.us").id_salt("c_server"));
+                if !web {
+                    ui.add(TextInput::new(&mut d.server).label("Server").hint("https://genie.henshaw.us").id_salt("c_server"));
+                }
                 ui.add(TextInput::new(&mut d.username).label("Username").id_salt("c_user"));
                 let pw = ui.add(TextInput::new(&mut d.password).label("Password").password(true).id_salt("c_pass"));
                 if pw.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -176,7 +197,9 @@ impl RemoteUi {
                     ui.label(RichText::new(e).color(Theme::current(ui.ctx()).palette.red));
                 }
                 ui.add_space(8.0);
-                muted(ui, "Your copy of the tree is kept on this computer too, so you can keep working without a connection and sync later.");
+                if !web {
+                    muted(ui, "Your copy of the tree is kept on this computer too, so you can keep working without a connection and sync later.");
+                }
                 ui.add_space(10.0);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let ok = !waiting && !d.username.trim().is_empty() && !d.password.is_empty();
@@ -189,13 +212,17 @@ impl RemoteUi {
                 });
             });
         if submit && !waiting && !d.username.trim().is_empty() {
-            let (tx, rx) = channel();
-            let (server, user, pass, ctx) = (d.server.clone(), d.username.clone(), d.password.clone(), ctx.clone());
-            std::thread::spawn(move || {
-                let _ = tx.send(remote::sign_in(&server, &user, &pass));
-                ctx.request_repaint();
-            });
-            d.waiting = Some(rx);
+            if web {
+                d.waiting = Some(remote::sign_in_web(ctx, &d.server, &d.username, &d.password));
+            } else {
+                let (tx, rx) = channel();
+                let (server, user, pass, ctx) = (d.server.clone(), d.username.clone(), d.password.clone(), ctx.clone());
+                std::thread::spawn(move || {
+                    let _ = tx.send(remote::sign_in(&server, &user, &pass));
+                    ctx.request_repaint();
+                });
+                d.waiting = Some(rx);
+            }
             d.error = None;
         }
         if !d.open && !waiting {
@@ -273,11 +300,7 @@ impl RemoteUi {
             } else if d.new.chars().count() < 10 {
                 d.error = Some("Use at least 10 characters.".into());
             } else {
-                let (current, new) = (d.current.clone(), d.new.clone());
-                remote.request(ctx, move |c| match c.change_password(&current, &new) {
-                    Ok((token, expires_at)) => Event::PasswordChanged { token, expires_at },
-                    Err(e) => Event::Failed(e),
-                });
+                remote.change_password(ctx, d.current.clone(), d.new.clone());
                 self.password = None;
                 return;
             }
@@ -350,20 +373,14 @@ impl RemoteUi {
                 }
             });
         for (id, change, done) in changes {
-            remote.request(ctx, move |c| match c.update_account(id, change) {
-                Ok(()) => Event::Done(done.into()),
-                Err(e) => Event::Failed(e),
-            });
+            remote.update_account(ctx, id, change, done.into());
         }
         if create {
             let (u, n, pw, role) = (d.new_username.trim().to_string(), d.new_display.trim().to_string(), d.new_password.clone(), d.new_role);
             d.new_username.clear();
             d.new_display.clear();
             d.new_password.clear();
-            remote.request(ctx, move |c| match c.create_account(&u, &n, &pw, role) {
-                Ok(()) => Event::Done(format!("Added {u}.")),
-                Err(e) => Event::Failed(e),
-            });
+            remote.create_account(ctx, u, n, pw, role);
         }
         if !d.open {
             self.accounts = None;
@@ -413,10 +430,7 @@ impl RemoteUi {
 }
 
 pub fn refresh_accounts(remote: &mut Remote, ctx: &egui::Context) {
-    remote.request(ctx, |c| match c.accounts() {
-        Ok(list) => Event::Accounts(list),
-        Err(e) => Event::Failed(e),
-    });
+    remote.load_accounts(ctx);
 }
 
 /// "Syncing with genie.henshaw.us…", over everything while the tree is exchanged.

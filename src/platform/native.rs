@@ -27,6 +27,16 @@ pub fn set_title(ctx: &egui::Context, title: &str) {
 
 pub fn set_unsaved(_unsaved: bool) {}
 
+/// The page's own server; only the browser has one.
+pub fn origin() -> String {
+    String::new()
+}
+
+/// The browser keeps the documents its account may see; the desktop has files.
+pub fn set_hosted_media(_files: Vec<(String, String)>) {}
+
+pub fn install_loaders(_ctx: &egui::Context) {}
+
 // ---- dialogs -------------------------------------------------------------------------------
 
 pub fn pick_ged(dir: Option<&Path>) -> Option<PathBuf> {

@@ -2,7 +2,7 @@
 //! served the page (see `server.rs`).
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 
@@ -15,11 +15,14 @@ use crate::media::path_string;
 thread_local! {
     /// Media files that exist on the server, as it reported them.
     static FILES: RefCell<HashSet<String>> = RefCell::new(HashSet::new());
+    /// On a Genie server with accounts: document path → SHA-256, for the
+    /// documents this account may see (see [`set_hosted_media`]).
+    static HOSTED: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
     static UNSAVED: Cell<bool> = const { Cell::new(false) };
     static UNLOAD_GUARD: Cell<bool> = const { Cell::new(false) };
 }
 
-fn origin() -> String {
+pub fn origin() -> String {
     web_sys::window().and_then(|w| w.location().origin().ok()).unwrap_or_default()
 }
 
@@ -27,8 +30,26 @@ pub fn exists(p: &Path) -> bool {
     FILES.with_borrow(|f| f.contains(&path_string(p)))
 }
 
-/// The server's URL for one of its files, as `/media/<path>`.
+/// The shared tree's documents, as (path, sha256). Their paths are made
+/// absolute under `/`, where the tree is taken to live.
+pub fn set_hosted_media(files: Vec<(String, String)>) {
+    FILES.set(files.iter().map(|(p, _)| format!("/{p}")).collect());
+    HOSTED.set(files.into_iter().collect());
+}
+
+fn hosted_sha(p: &Path) -> Option<String> {
+    let path = path_string(p);
+    HOSTED.with_borrow(|h| h.get(path.trim_start_matches('/')).cloned())
+}
+
+/// Where to get one of the server's files: a Genie server's documents by
+/// hash (through [`MediaLoader`], which sends the sign-in cookie), or
+/// `genie --serve`'s as `/media/<path>`.
 pub fn image_uri(p: &Path) -> String {
+    if let Some(sha) = hosted_sha(p) {
+        let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        return format!("{MEDIA_SCHEME}{sha}/{name}");
+    }
     let path = path_string(p);
     let mut out = format!("{}/media/", origin());
     for b in path.trim_start_matches('/').bytes() {
@@ -45,8 +66,76 @@ pub fn open_path(ctx: &egui::Context, p: &Path) -> Result<(), String> {
     if !exists(p) {
         return Err("The browser can only open documents, not folders.".into());
     }
-    ctx.open_url(egui::OpenUrl::new_tab(image_uri(p)));
+    let url = match hosted_sha(p) {
+        Some(sha) => format!("{}/api/media/{sha}", origin()),
+        None => image_uri(p),
+    };
+    ctx.open_url(egui::OpenUrl::new_tab(url));
     Ok(())
+}
+
+const MEDIA_SCHEME: &str = "genie-media://";
+
+/// Loads a Genie server's documents with the sign-in cookie, which egui's
+/// own HTTP loader doesn't send.
+#[derive(Default)]
+struct MediaLoader {
+    cache: std::sync::Arc<std::sync::Mutex<HashMap<String, Option<Result<(egui::load::Bytes, Option<String>), String>>>>>,
+}
+
+impl egui::load::BytesLoader for MediaLoader {
+    fn id(&self) -> &str {
+        egui::generate_loader_id!(MediaLoader)
+    }
+
+    fn load(&self, ctx: &egui::Context, uri: &str) -> egui::load::BytesLoadResult {
+        use egui::load::{BytesPoll, LoadError};
+        let Some(rest) = uri.strip_prefix(MEDIA_SCHEME) else { return Err(LoadError::NotSupported) };
+        let sha = rest.split('/').next().unwrap_or_default().to_string();
+        let mut cache = self.cache.lock().unwrap();
+        match cache.get(uri) {
+            Some(Some(Ok((bytes, mime)))) => return Ok(BytesPoll::Ready { size: None, bytes: bytes.clone(), mime: mime.clone() }),
+            Some(Some(Err(e))) => return Err(LoadError::Loading(e.clone())),
+            Some(None) => return Ok(BytesPoll::Pending { size: None }),
+            None => {}
+        }
+        cache.insert(uri.to_string(), None);
+        let (cache, uri, ctx) = (self.cache.clone(), uri.to_string(), ctx.clone());
+        let mut req = ehttp::Request::get(format!("{}/api/media/{sha}", origin()));
+        req.credentials = ehttp::Credentials::SameOrigin;
+        ehttp::fetch(req, move |r| {
+            let result = match r {
+                Ok(resp) if resp.ok => {
+                    let mime = resp.content_type().map(str::to_string);
+                    Ok((egui::load::Bytes::Shared(resp.bytes.into()), mime))
+                }
+                Ok(resp) => Err(format!("{} {}", resp.status, resp.status_text)),
+                Err(e) => Err(e),
+            };
+            cache.lock().unwrap().insert(uri, Some(result));
+            ctx.request_repaint();
+        });
+        Ok(BytesPoll::Pending { size: None })
+    }
+
+    fn forget(&self, uri: &str) {
+        self.cache.lock().unwrap().remove(uri);
+    }
+
+    fn forget_all(&self) {
+        self.cache.lock().unwrap().clear();
+    }
+
+    fn byte_size(&self) -> usize {
+        self.cache.lock().unwrap().values().map(|v| match v {
+            Some(Ok((b, _))) => b.len(),
+            _ => 0,
+        }).sum()
+    }
+}
+
+pub fn install_loaders(ctx: &egui::Context) {
+    ctx.add_bytes_loader(std::sync::Arc::new(MediaLoader::default()));
 }
 
 pub fn open_url(ctx: &egui::Context, url: &str) {

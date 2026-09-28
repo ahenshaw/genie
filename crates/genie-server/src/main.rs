@@ -17,6 +17,7 @@
 //! | `BIND_ADDR` | default `127.0.0.1:3100` |
 //! | `MEDIA_DIR` | default `/var/lib/genie/media` |
 //! | `LIVING_YEARS` | default 100: born that long ago counts as deceased for guests |
+//! | `WEB_DIR` | the browser app's files (a trunk bundle), served at `/`; unset, only the API |
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -101,8 +102,14 @@ async fn main() {
     std::fs::create_dir_all(&media_dir).unwrap_or_else(|e| fail(format!("can't use MEDIA_DIR {}: {e}", media_dir.display())));
     let living_years = env("LIVING_YEARS").map(|v| v.parse().unwrap_or_else(|_| fail("LIVING_YEARS must be a number"))).unwrap_or(genie_core::privacy::LIVING_YEARS);
     let bind = env("BIND_ADDR").unwrap_or_else(|| "127.0.0.1:3100".into());
+    let web_dir = env("WEB_DIR").map(PathBuf::from);
+    if let Some(d) = &web_dir
+        && !d.join("index.html").is_file()
+    {
+        eprintln!("genie-server: WEB_DIR {} has no index.html; the browser app won't load", d.display());
+    }
 
-    let state = AppState::new(pool, Config { session_secret: secret.into_bytes(), media_dir, living_years });
+    let state = AppState::new(pool, Config { session_secret: secret.into_bytes(), media_dir, living_years, web_dir });
     let app = genie_server::router(state);
     let listener = tokio::net::TcpListener::bind(&bind).await.unwrap_or_else(|e| fail(format!("can't listen on {bind}: {e}")));
     println!("genie-server listening on {}", listener.local_addr().map(|a| a.to_string()).unwrap_or(bind));

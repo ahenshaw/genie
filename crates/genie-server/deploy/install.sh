@@ -14,6 +14,7 @@ set -euo pipefail
 STAGE="$(cd "$(dirname "$0")" && pwd)"
 OPT=/opt/genie-server
 ENV_FILE=$OPT/.env
+WEB_DIR=$OPT/web
 DATA=/var/lib/genie
 WEB=/var/www/genie
 SITE=genie.henshaw.us
@@ -72,11 +73,27 @@ SESSION_SECRET=$SECRET
 BIND_ADDR=127.0.0.1:$PORT
 MEDIA_DIR=$DATA/media
 LIVING_YEARS=100
+WEB_DIR=$WEB_DIR
 ENV
   )
   chown root:root "$ENV_FILE"
   chmod 600 "$ENV_FILE"
   echo "    wrote $ENV_FILE"
+fi
+
+# Installs from before the browser app lacked this.
+if ! grep -q '^WEB_DIR=' "$ENV_FILE"; then
+  echo "WEB_DIR=$WEB_DIR" >> "$ENV_FILE"
+  echo "    added WEB_DIR to $ENV_FILE"
+fi
+
+if [[ -f "$STAGE/web/index.html" ]]; then
+  echo "==> Installing the browser app in $WEB_DIR"
+  install -d -m 755 "$WEB_DIR"
+  rsync -a --delete "$STAGE/web/" "$WEB_DIR/"
+  chown -R root:root "$WEB_DIR"
+  find "$WEB_DIR" -type d -exec chmod 755 {} +
+  find "$WEB_DIR" -type f -exec chmod 644 {} +
 fi
 
 echo "==> Installing the binary"
@@ -129,6 +146,8 @@ fi
 
 code=$(curl -s -o /dev/null -w '%{http_code}' "https://$SITE/api/me" || true)
 echo "==> https://$SITE/api/me answers $code (401 is right: not signed in)"
+code=$(curl -s -o /dev/null -w '%{http_code}' "https://$SITE/" || true)
+echo "==> https://$SITE/ answers $code (200: the browser app)"
 
 users=$(mysql_admin -N genie -e "SELECT COUNT(*) FROM users" 2>/dev/null || echo "?")
 if [[ "$users" == 0 ]]; then

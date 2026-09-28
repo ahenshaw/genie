@@ -127,7 +127,17 @@ pub fn person_chip(ui: &mut Ui, doc: &Document, xref: &str, caption: Option<&str
 }
 
 /// A dashed placeholder inviting the user to add a relative.
+/// Signed in to a shared tree with an account that can't change it: the app
+/// publishes this each frame so views can leave out their editing controls.
+pub fn read_only(ctx: &egui::Context) -> bool {
+    ctx.data(|d| d.get_temp::<bool>(egui::Id::new("genie_read_only"))).unwrap_or(false)
+}
+
+/// A dashed "+ Add …" slot. Read-only accounts get nothing, never clicked.
 pub fn add_chip(ui: &mut Ui, label: &str) -> Response {
+    if read_only(ui.ctx()) {
+        return ui.allocate_response(egui::Vec2::ZERO, Sense::hover());
+    }
     let theme = Theme::current(ui.ctx());
     let p = &theme.palette;
     let width = ui.available_width().clamp(160.0, 360.0);

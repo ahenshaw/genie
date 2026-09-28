@@ -205,6 +205,8 @@ pub struct GenieApp {
     last_username: String,
     /// What was open before signing in, offered for an empty server.
     before_connect: Option<PathBuf>,
+    /// The browser, starting up: asking the server who's signed in.
+    web_probe: Option<std::sync::mpsc::Receiver<Result<Option<remote::User>, ()>>>,
 }
 
 impl GenieApp {
@@ -249,6 +251,7 @@ impl GenieApp {
             last_server: String::new(),
             last_username: String::new(),
             before_connect: None,
+            web_probe: None,
         };
         if let Some(storage) = cc.storage {
             if let Some(t) = storage.get_string("theme")
@@ -278,8 +281,11 @@ impl GenieApp {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         // Reopen whatever file was open when Genie last quit, unless one was
         // named on the command line or the file has since gone away.
+        platform::install_loaders(&cc.egui_ctx);
         if platform::WEB {
-            app.load_from_server(&cc.egui_ctx);
+            // A Genie server with accounts, or `genie --serve`? Ask it.
+            app.server_load = Some(Ok(()));
+            app.web_probe = Some(remote::probe(&cc.egui_ctx, &platform::origin()));
         } else if let Some(path) = open.or(last_open.filter(|p| p.is_file())) {
             app.load_path(&cc.egui_ctx, &path);
         }
@@ -518,6 +524,7 @@ impl GenieApp {
                 };
                 self.remote_ui.open_connect(&server, &user, None);
             }
+            Pending::Open(None) if platform::WEB && self.remote.is_some() => self.sync(ctx, HashMap::new()),
             Pending::Open(None) if platform::WEB => self.load_from_server(ctx),
             Pending::Open(None) => {
                 if let Some(p) = platform::pick_ged(self.recent.first().and_then(|p| p.parent())) {
@@ -601,6 +608,17 @@ impl GenieApp {
         if self.remote.as_ref().is_none_or(|r| r.busy.is_some()) {
             return;
         }
+        if platform::WEB {
+            let changed = !self.read_only() && self.doc.as_ref().is_some_and(|d| d.dirty);
+            let text = self.doc.as_ref().map(|d| d.to_gedcom());
+            if let Some(r) = self.remote.as_mut() {
+                match text.filter(|_| changed) {
+                    Some(t) => r.save_tree(ctx, t, resolve),
+                    None => r.load_tree(ctx),
+                }
+            }
+            return;
+        }
         if !self.read_only() && self.doc.as_ref().is_some_and(|d| d.dirty) && !self.save(ctx, false) {
             return;
         }
@@ -613,8 +631,16 @@ impl GenieApp {
     /// staying on the same person and section.
     fn reload_working_copy(&mut self) {
         let Some(tree) = self.remote.as_ref().map(|r| r.tree.clone()) else { return };
-        let Ok(bytes) = std::fs::read(&tree) else { return };
-        let (mut doc, notes) = Document::from_bytes(&bytes);
+        if let Ok(bytes) = std::fs::read(&tree) {
+            self.adopt(&bytes);
+        }
+    }
+
+    /// Makes `bytes` the shared tree's document (the browser has it in
+    /// memory rather than on disk), staying on the same person and section.
+    fn adopt(&mut self, bytes: &[u8]) {
+        let Some(tree) = self.remote.as_ref().map(|r| r.tree.clone()) else { return };
+        let (mut doc, notes) = Document::from_bytes(bytes);
         doc.path = Some(tree);
         if self.doc.is_none() {
             self.set_doc(doc);
@@ -636,6 +662,13 @@ impl GenieApp {
             .show(ctx);
         let tree = remote.tree.clone();
         self.remote = Some(remote);
+        if platform::WEB {
+            self.server_load = Some(Ok(()));
+            if let Some(r) = self.remote.as_mut() {
+                r.load_tree(ctx);
+            }
+            return;
+        }
         if tree.is_file() {
             self.load_path(ctx, &tree);
         } else {
@@ -653,16 +686,18 @@ impl GenieApp {
     /// Ends this account's sign-ins everywhere, and closes the shared tree.
     fn sign_out(&mut self, ctx: &egui::Context) {
         let Some(mut r) = self.remote.take() else { return };
-        let client = r.client();
-        std::thread::spawn(move || {
-            let _ = client.sign_out_everywhere();
-        });
-        r.state.token.clear();
-        let _ = r.save_state();
-        Toast::new(format!("Signed out of {}", r.host())).description("Your copy stays on this computer; sign in again to sync it.").show(ctx);
+        r.sign_out_everywhere(ctx);
         self.doc = None;
         self.selected = None;
         self.editor = None;
+        if platform::WEB {
+            self.server_load = None;
+            self.remote_ui.open_connect("", &r.state.user.username, None);
+            return;
+        }
+        r.state.token.clear();
+        let _ = r.save_state();
+        Toast::new(format!("Signed out of {}", r.host())).description("Your copy stays on this computer; sign in again to sync it.").show(ctx);
     }
 
     /// Puts a tree on the server: a `.gdz` as it is, a `.ged` bundled with
@@ -767,6 +802,45 @@ impl GenieApp {
                     Toast::new(format!("Tree uploaded to {host}")).tone(BadgeTone::Ok).show(ctx);
                     r.sync(ctx, HashMap::new());
                 }
+                remote::Event::WebTree { revision, gedcom } => {
+                    r.state.base_revision = revision;
+                    r.forget_history();
+                    r.history.clear();
+                    r.load_media(ctx);
+                    if revision.is_none() && r.role() == remote::Role::Admin {
+                        Toast::new("The shared tree is empty")
+                            .description("Upload one from the desktop app: Tools → Upload a tree to the server.")
+                            .show(ctx);
+                    }
+                    self.server_load = None;
+                    self.adopt(gedcom.as_bytes());
+                    return self.remote_events(ctx);
+                }
+                remote::Event::WebSaved { revision, merged, renamed, gedcom } => {
+                    r.state.base_revision = Some(revision);
+                    r.forget_history();
+                    r.history.clear();
+                    r.load_media(ctx);
+                    let mut toast = Toast::new(if merged { "Synced, with others' changes merged in" } else { "Synced" }).tone(BadgeTone::Ok);
+                    if renamed > 0 {
+                        toast = toast.description(format!("{renamed} new record{} renumbered, as someone else had used the number", if renamed == 1 { "" } else { "s" }));
+                    }
+                    toast.show(ctx);
+                    match gedcom {
+                        Some(text) => self.adopt(text.as_bytes()),
+                        None => {
+                            if let Some(d) = self.doc.as_mut() {
+                                d.dirty = false;
+                            }
+                        }
+                    }
+                    return self.remote_events(ctx);
+                }
+                remote::Event::WebMedia(files) => {
+                    platform::set_hosted_media(files);
+                    ctx.forget_all_images();
+                }
+                remote::Event::SignedOut => {}
                 remote::Event::Failed(e) if e == remote::SIGNED_OUT => {
                     let (server, user) = (r.state.server.clone(), r.state.user.username.clone());
                     self.remote_ui.open_connect(&server, &user, Some(e));
@@ -1329,6 +1403,19 @@ impl GenieApp {
         let (mut focus_search, mut shortcuts_open, mut about_open) = (false, false, false);
         bar.show(ui, |bar| {
             bar.menu("File", |ui| {
+                if let (true, Some((_, busy))) = (platform::WEB, connected) {
+                    // The shared tree on the page's own server.
+                    if ui.add(MenuItem::new("Sync").icon(glyphs::SAVE.to_string()).shortcut("Ctrl S").enabled(!busy)).clicked() {
+                        acts.push(Action::Sync);
+                    }
+                    if ui.add(MenuItem::new("Change password…")).clicked() {
+                        acts.push(Action::ChangePassword);
+                    }
+                    if ui.add(MenuItem::new("Sign out")).on_hover_text("Ends your sign-in here and on every other computer").clicked() {
+                        acts.push(Action::SignOut);
+                    }
+                    return;
+                }
                 if platform::WEB {
                     // The browser edits the one tree the server was started with.
                     if ui.add(MenuItem::new("Reload").icon(glyphs::FOLDER_OPEN.to_string()).shortcut("Ctrl O")).on_hover_text("Load the tree from the server again").clicked() {
@@ -1470,17 +1557,18 @@ impl GenieApp {
                 if ui.add(MenuItem::new("Find duplicate sources…").enabled(has_doc)).clicked() {
                     acts.push(Action::FindDuplicateSources);
                 }
-                if platform::WEB {
-                    return;
-                }
                 if let Some((remote::Role::Admin, _)) = connected {
                     ui.separator();
                     if ui.add(MenuItem::new("Accounts…").icon(glyphs::KEY.to_string())).on_hover_text("Who can see and edit the shared tree").clicked() {
                         acts.push(Action::Accounts);
                     }
-                    if ui.add(MenuItem::new("Upload a tree to the server…")).on_hover_text("Replace the shared tree with one from a file (kept in its history)").clicked() {
+                    // Needs files on this computer.
+                    if !platform::WEB && ui.add(MenuItem::new("Upload a tree to the server…")).on_hover_text("Replace the shared tree with one from a file (kept in its history)").clicked() {
                         acts.push(Action::UploadTree);
                     }
+                }
+                if platform::WEB {
+                    return;
                 }
                 ui.separator();
                 if ui.add(MenuItem::new("Get photos from WikiTree…").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc)).clicked() {
@@ -1991,6 +2079,19 @@ impl eframe::App for GenieApp {
             }
         }
         self.server_events(&ctx);
+        if let Some(answer) = self.web_probe.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.web_probe = None;
+            match answer {
+                Ok(Some(user)) => self.connected(&ctx, Remote::new_web(&platform::origin(), user)),
+                Ok(None) => {
+                    self.server_load = None;
+                    let user = self.last_username.clone();
+                    self.remote_ui.open_connect("", &user, None);
+                }
+                // `genie --serve` on someone's computer: its one tree, no accounts.
+                Err(()) => self.load_from_server(&ctx),
+            }
+        }
         self.remote_events(&ctx);
         if let Some(r) = self.remote.as_mut() {
             r.maybe_poll(&ctx);

@@ -10,6 +10,13 @@ HOST="${GENIE_HOST:-tennis.henshaw.us}"
 STAGE="deploy-genie-server"
 BIN=target/release/genie-server
 
+echo "==> Building the browser app (trunk build --release)"
+trunk build --release
+if [[ ! -f dist/index.html ]]; then
+  echo "error: dist/index.html not found after trunk build" >&2
+  exit 1
+fi
+
 echo "==> Building (cargo build --release -p genie-server)"
 cargo build --release -p genie-server
 
@@ -25,6 +32,7 @@ echo "==> glibc: needs $need, $HOST has $have"
 echo "==> Staging to ${HOST}:~/${STAGE}/"
 ssh "$HOST" "mkdir -p ~/${STAGE}"
 rsync -az "$BIN" crates/genie-server/deploy/{install.sh,genie-admin,genie-server.service,genie.henshaw.us.conf} "${HOST}:${STAGE}/"
+rsync -az --delete dist/ "${HOST}:${STAGE}/web/"
 
 cat <<EOF
 

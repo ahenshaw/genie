@@ -30,6 +30,10 @@ struct Env {
 
 impl Env {
     async fn new() -> Option<Env> {
+        Self::with_web(None).await
+    }
+
+    async fn with_web(web_dir: Option<std::path::PathBuf>) -> Option<Env> {
         let Ok(url) = std::env::var("GENIE_TEST_MYSQL") else {
             eprintln!("GENIE_TEST_MYSQL not set; skipping");
             return None;
@@ -42,7 +46,7 @@ impl Env {
         MIGRATOR.run(&pool).await.unwrap();
         let media = std::env::temp_dir().join(&db);
         let _ = std::fs::remove_dir_all(&media);
-        let state = AppState::new(pool.clone(), Config { session_secret: b"test-secret-that-is-plenty-long-enough".to_vec(), media_dir: media.clone(), living_years: 100 });
+        let state = AppState::new(pool.clone(), Config { session_secret: b"test-secret-that-is-plenty-long-enough".to_vec(), media_dir: media.clone(), living_years: 100, web_dir });
         Some(Env { app: genie_server::router(state), pool, root, db, media })
     }
 
@@ -313,5 +317,64 @@ async fn a_bundle_imports_the_tree_and_its_documents() {
     assert_eq!(env.raw("POST", "/api/import", &admin, bundle.clone()).await.0, StatusCode::CONFLICT);
     assert_eq!(env.raw("POST", "/api/import?replace=true", &admin, bundle).await.0, StatusCode::OK);
     let _ = std::fs::remove_dir_all(&dir);
+    env.done().await;
+}
+
+#[tokio::test]
+async fn browsers_sign_in_with_a_cookie_that_only_this_site_can_use() {
+    let web = std::env::temp_dir().join(format!("genie-web-test-{}", std::process::id()));
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("index.html"), "<!doctype html><title>Genie</title>").unwrap();
+    std::fs::write(web.join("genie-abc123.js"), "// app").unwrap();
+    let Some(env) = Env::with_web(Some(web.clone())).await else { return };
+    let admin = env.user("admin", "", Role::Admin).await;
+    env.seed(&admin, &sample()).await;
+    auth::create_user(&env.pool, "ed", "Ed", PASSWORD, Role::Editor).await.unwrap();
+
+    // Signing in as a browser sets an HttpOnly, SameSite=Strict cookie.
+    let req = Request::post("/api/login").header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(json!({"username": "ed", "password": PASSWORD, "cookie": true}).to_string())).unwrap();
+    let resp = env.app.clone().oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let set = resp.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_string();
+    assert!(set.contains("HttpOnly") && set.contains("SameSite=Strict") && set.contains("Secure"), "{set}");
+    let cookie = set.split(';').next().unwrap().to_string();
+
+    let with_cookie = |method: &str, uri: &str, csrf: bool, body: Option<Value>| {
+        let mut r = Request::builder().method(method).uri(uri).header(header::COOKIE, &cookie);
+        if csrf {
+            r = r.header("X-Genie", "1");
+        }
+        let r = match body {
+            Some(b) => r.header(header::CONTENT_TYPE, "application/json").body(Body::from(b.to_string())),
+            None => r.body(Body::empty()),
+        };
+        r.unwrap()
+    };
+    let (status, body) = env.send(with_cookie("GET", "/api/tree", false, None)).await;
+    assert_eq!(status, StatusCode::OK);
+    let tree: Value = serde_json::from_slice(&body).unwrap();
+    let (rev, text) = (tree["revision"].as_i64().unwrap(), tree["gedcom"].as_str().unwrap().replace("Thomas /Hartwell/", "Tom /Hartwell/"));
+
+    // A change riding on the cookie alone is refused; with the header it goes in.
+    let save = json!({"base_revision": rev, "gedcom": text});
+    assert_eq!(env.send(with_cookie("POST", "/api/tree", false, Some(save.clone()))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(env.send(with_cookie("POST", "/api/tree", true, Some(save))).await.0, StatusCode::OK);
+
+    // The app's files, with its page checked each time and the rest cached.
+    let get = |uri: &str| Request::builder().uri(uri).body(Body::empty()).unwrap();
+    let resp = env.app.clone().oneshot(get("/")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(resp.headers()[header::CACHE_CONTROL], "no-cache");
+    assert_eq!(resp.headers()[header::X_FRAME_OPTIONS], "DENY");
+    let resp = env.app.clone().oneshot(get("/genie-abc123.js")).await.unwrap();
+    assert!(resp.headers()[header::CACHE_CONTROL].to_str().unwrap().contains("immutable"));
+
+    // Signing out clears the cookie and ends the session.
+    let req = with_cookie("POST", "/api/logout", true, None);
+    let resp = env.app.clone().oneshot(req).await.unwrap();
+    assert!(resp.headers()[header::SET_COOKIE].to_str().unwrap().contains("Max-Age=0"));
+    assert_eq!(env.send(with_cookie("GET", "/api/me", false, None)).await.0, StatusCode::UNAUTHORIZED);
+    let _ = std::fs::remove_dir_all(&web);
     env.done().await;
 }

@@ -323,7 +323,7 @@ impl Canvas<'_> {
 
     fn add_box(&mut self, ui: &mut Ui, world: Rect, label: &str, anchor: &str, rel: Relation) {
         let rect = self.rect(world);
-        if !rect.intersects(self.clip) {
+        if !rect.intersects(self.clip) || crate::widgets::read_only(ui.ctx()) {
             return;
         }
         let p = Theme::current(ui.ctx()).palette;

@@ -66,6 +66,11 @@ several people can build it together:
 - **Starting the shared tree:** an administrator uploads it from *Tools → Upload a tree
   to the server…*, which takes a `.gdz` bundle (with documents) or a `.ged` file.
 
+Anyone with an account can also use the shared tree in a web browser at
+<https://genie.henshaw.us>, with nothing to install. It's the same app, with the same
+roles, sync and history, but without a copy kept on the computer. Adding documents and
+uploading a tree need the desktop app.
+
 The server itself is described in [crates/genie-server](crates/genie-server/README.md).
 
 ## Getting started

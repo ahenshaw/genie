@@ -6,7 +6,8 @@ in:
 - Editors' changes are merged, and each change is recorded against whoever made it.
 - Guests see only people who have died.
 
-The desktop app talks to this server over HTTPS; the browser version will later too.
+The desktop app talks to this server over HTTPS, and the server also serves the browser
+version of the app at `/`.
 MySQL is reached only by this server, over loopback, and never from outside.
 
 ## Roles
@@ -18,11 +19,16 @@ MySQL is reached only by this server, over loopback, and never from outside.
 | family | everything | read only |
 | guest | the deceased; living people as "Private" | read only |
 
-## API (JSON, under `/api`, `Authorization: Bearer <token>`)
+## API (JSON, under `/api`)
+
+The desktop app sends `Authorization: Bearer <token>`. The browser app signs in with
+`"cookie": true` and gets a session cookie instead. That cookie is HttpOnly, Secure and
+SameSite=Strict, and any change made with it must also carry an `X-Genie` header,
+which a page on another site can't add.
 
 | Endpoint | Who | What |
 |---|---|---|
-| `POST /login` `{username, password}` | anyone | → `{token, expires_at, user}`. Five wrong passwords lock the username or address for 15 minutes. |
+| `POST /login` `{username, password, cookie?}` | anyone | → `{token, expires_at, user}`. Five wrong passwords lock the username or address for 15 minutes. |
 | `POST /logout` | signed in | ends every session of the account |
 | `GET /me` | signed in | the account |
 | `POST /password` `{current, new}` | signed in | → a new token; other sessions end |
@@ -47,6 +53,7 @@ active admin can't be demoted or disabled.
 | `BIND_ADDR` | `127.0.0.1:3100` | |
 | `MEDIA_DIR` | `/var/lib/genie/media` | documents, as `<sha256>` files |
 | `LIVING_YEARS` | `100` | born this long ago counts as deceased for guests |
+| `WEB_DIR` | (unset) | the browser app (a `trunk build` bundle), served at `/` |
 
 The schema is applied at startup.
 
@@ -76,6 +83,7 @@ Apache terminates TLS and proxies everything to `127.0.0.1:3100`.
 /etc/systemd/system/genie-server.service        runs as www-data, writes only /var/lib/genie
 /etc/apache2/sites-available/genie.henshaw.us.conf          :80, redirects to HTTPS
 /etc/apache2/sites-available/genie.henshaw.us-le-ssl.conf   :443, written by certbot
+/opt/genie-server/web/                          the browser app (trunk bundle)
 /usr/local/bin/genie-admin                      the CLI with .env loaded
 ```
 
@@ -84,7 +92,7 @@ MySQL has a `genie` database. Its `genie` account can connect from localhost onl
 **Deploying a new build.** sudo on the VPS asks for a password, so this is two steps:
 
 ```sh
-crates/genie-server/deploy/deploy.sh          # build, check glibc, stage to ~/deploy-genie-server/
+crates/genie-server/deploy/deploy.sh          # build the app and server, check glibc, stage to ~/deploy-genie-server/
 ssh -t tennis.henshaw.us 'sudo bash ~/deploy-genie-server/install.sh'
 ```
 

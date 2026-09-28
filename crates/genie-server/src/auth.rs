@@ -146,13 +146,20 @@ impl CurrentUser {
 
 pub const COOKIE: &str = "genie_session";
 
-fn token_from(parts: &Parts) -> Option<&str> {
+/// Sent with every change the browser app makes. A page on another site
+/// can't add a custom header to a request here without the server's say-so
+/// (CORS), so requiring it on cookie-authenticated changes stops them being
+/// forged, on top of the cookie being SameSite=Strict.
+pub const CSRF_HEADER: &str = "x-genie";
+
+/// The session token, and whether it came from the cookie.
+fn token_from(parts: &Parts) -> Option<(&str, bool)> {
     if let Some(v) = parts.headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok())
         && let Some(t) = v.strip_prefix("Bearer ")
     {
-        return Some(t.trim());
+        return Some((t.trim(), false));
     }
-    // The browser app (later) holds the token in an HttpOnly cookie instead.
+    // The browser app holds it in an HttpOnly cookie instead.
     parts
         .headers
         .get(header::COOKIE)
@@ -160,14 +167,25 @@ fn token_from(parts: &Parts) -> Option<&str> {
         .split(';')
         .filter_map(|pair| pair.trim().split_once('='))
         .find(|(k, _)| *k == COOKIE)
-        .map(|(_, v)| v)
+        .map(|(_, v)| (v, true))
+}
+
+/// `Set-Cookie` for a browser's sign-in, or (with `None`) to end it.
+pub fn session_cookie(token: Option<&str>) -> String {
+    match token {
+        Some(t) => format!("{COOKIE}={t}; Path=/; Max-Age={TOKEN_LIFETIME}; HttpOnly; Secure; SameSite=Strict"),
+        None => format!("{COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"),
+    }
 }
 
 impl FromRequestParts<State> for CurrentUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &State) -> Result<Self, Self::Rejection> {
-        let token = token_from(parts).ok_or_else(ApiError::unauthorized)?;
+        let (token, from_cookie) = token_from(parts).ok_or_else(ApiError::unauthorized)?;
+        if from_cookie && parts.method != axum::http::Method::GET && !parts.headers.contains_key(CSRF_HEADER) {
+            return Err(ApiError::forbidden());
+        }
         let (id, epoch) = verify_token(&state.config.session_secret, token).ok_or_else(ApiError::unauthorized)?;
         let row: Option<(String, String, String, bool, i32)> =
             sqlx::query_as("SELECT username, display_name, CAST(role AS CHAR), disabled, session_epoch FROM users WHERE id = ?")

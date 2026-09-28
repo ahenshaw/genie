@@ -277,36 +277,15 @@ impl Client {
         if (200..300).contains(&r.status) { Ok(r) } else { Err(r.error()) }
     }
 
+    #[cfg(test)]
     pub fn changes(&self, since: Option<i64>, xref: Option<&str>) -> Result<Vec<ChangeRow>, String> {
-        let mut q = format!("/api/changes?since={}", since.unwrap_or(0));
-        if let Some(x) = xref {
-            q.push_str(&format!("&xref={}", url_escape(x)));
-        }
-        self.ok("GET", &q, Payload::None)?.json()
+        self.ok("GET", &changes_path(since, xref), Payload::None)?.json()
     }
 
-    pub fn accounts(&self) -> Result<Vec<Account>, String> {
-        self.ok("GET", "/api/users", Payload::None)?.json()
-    }
-
+    #[cfg(test)]
     pub fn create_account(&self, username: &str, display_name: &str, password: &str, role: Role) -> Result<(), String> {
         self.ok("POST", "/api/users", Payload::Json(serde_json::json!({"username": username, "display_name": display_name, "password": password, "role": role})))
             .map(|_| ())
-    }
-
-    pub fn update_account(&self, id: i32, change: serde_json::Value) -> Result<(), String> {
-        self.ok("PATCH", &format!("/api/users/{id}"), Payload::Json(change)).map(|_| ())
-    }
-
-    /// A new token for this account; its other sign-ins end.
-    pub fn change_password(&self, current: &str, new: &str) -> Result<(String, u64), String> {
-        let s: Session = self.ok("POST", "/api/password", Payload::Json(serde_json::json!({"current": current, "new": new})))?.json()?;
-        Ok((s.token, s.expires_at))
-    }
-
-    /// Ends every sign-in of this account, everywhere.
-    pub fn sign_out_everywhere(&self) -> Result<(), String> {
-        self.ok("POST", "/api/logout", Payload::None).map(|_| ())
     }
 
     /// Replaces the server's tree, and adds its documents, from a `.gdz`.
@@ -314,6 +293,59 @@ impl Client {
         let path = if replace { "/api/import?replace=true" } else { "/api/import" };
         self.ok("POST", path, Payload::File(bundle)).map(|_| ())
     }
+}
+
+fn changes_path(since: Option<i64>, xref: Option<&str>) -> String {
+    let mut q = format!("/api/changes?since={}", since.unwrap_or(0));
+    if let Some(x) = xref {
+        q.push_str(&format!("&xref={}", url_escape(x)));
+    }
+    q
+}
+
+/// Sends a request and hands the reply to `done` later, without holding up
+/// the UI: on a thread on the desktop, with `fetch` in the browser (which
+/// sends the session cookie, and the header the server wants with it).
+fn fetch(ctx: &egui::Context, client: Client, method: &'static str, path: String, body: Option<serde_json::Value>, done: impl FnOnce(Result<Reply, String>) + Send + 'static) {
+    let ctx = ctx.clone();
+    #[cfg(not(target_arch = "wasm32"))]
+    std::thread::spawn(move || {
+        let payload = body.map(Payload::Json).unwrap_or(Payload::None);
+        done(client.send(method, &path, payload, None));
+        ctx.request_repaint();
+    });
+    #[cfg(target_arch = "wasm32")]
+    {
+        let method = match method {
+            "POST" => ehttp::Method::POST,
+            "PUT" => ehttp::Method::PUT,
+            "PATCH" => ehttp::Method::PATCH,
+            _ => ehttp::Method::GET,
+        };
+        let mut req = ehttp::Request::get(format!("{}{path}", client.server));
+        req.method = method;
+        req.credentials = ehttp::Credentials::SameOrigin;
+        req.headers.insert("X-Genie", "1");
+        if let Some(b) = body {
+            req.body = b.to_string().into_bytes();
+            req.headers.insert("Content-Type", "application/json");
+        }
+        ehttp::fetch(req, move |r| {
+            let reply = match r {
+                Ok(resp) if resp.status == 401 && path != "/api/login" && path != "/api/me" => Err(SIGNED_OUT.to_string()),
+                Ok(resp) => Ok(Reply { status: resp.status, body: resp.bytes }),
+                Err(e) => Err(format!("Couldn't reach the server: {e}")),
+            };
+            done(reply);
+            ctx.request_repaint();
+        });
+    }
+}
+
+/// A reply that should be a success, as one.
+fn success(r: Result<Reply, String>) -> Result<Reply, String> {
+    let r = r?;
+    if (200..300).contains(&r.status) { Ok(r) } else { Err(r.error()) }
 }
 
 fn url_escape(s: &str) -> String {
@@ -413,6 +445,14 @@ pub enum Event {
     Done(String),
     PasswordChanged { token: String, expires_at: u64 },
     Imported,
+    /// The browser: the tree as the server has it.
+    WebTree { revision: Option<i64>, gedcom: String },
+    /// The browser: a save went in. `gedcom` when others' changes were merged.
+    WebSaved { revision: i64, merged: bool, renamed: usize, gedcom: Option<String> },
+    /// The browser: the documents it may show, as (path, sha256).
+    WebMedia(Vec<(String, String)>),
+    /// Signed out everywhere.
+    SignedOut,
     Failed(String),
 }
 
@@ -483,26 +523,42 @@ impl Remote {
     pub fn poll(&mut self) -> Option<Event> {
         let e = self.rx.try_recv().ok()?;
         match &e {
-            Event::TreeSynced { .. } => self.busy = None,
-            Event::MediaSynced { .. } | Event::Conflicts(_) | Event::Failed(_) | Event::Imported | Event::Done(_) | Event::PasswordChanged { .. } | Event::Accounts(_) => {
-                self.busy = None;
-            }
             Event::News(_) => self.polling = false,
-            _ => {}
+            Event::History { .. } => {}
+            _ => self.busy = None,
         }
         Some(e)
     }
 
+    /// Runs a blocking job off the UI thread (the desktop's file-based sync).
     fn spawn(&self, ctx: &egui::Context, job: impl FnOnce() -> Event + Send + 'static) {
         let (tx, ctx) = (self.tx.clone(), ctx.clone());
+        #[cfg(not(target_arch = "wasm32"))]
         std::thread::spawn(move || {
             let _ = tx.send(job());
             ctx.request_repaint();
         });
+        // No threads in the browser; nothing calls this there but keep it harmless.
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = tx.send(job());
+            ctx.request_repaint();
+        }
     }
 
-    /// Exchanges the tree with the server, then its documents. The working
-    /// copy must already be saved to disk.
+    /// A request whose reply becomes an [`Event`].
+    fn ask(&mut self, ctx: &egui::Context, busy: Option<Busy>, method: &'static str, path: String, body: Option<serde_json::Value>, to_event: impl FnOnce(Result<Reply, String>) -> Event + Send + 'static) {
+        if busy.is_some() {
+            self.busy = busy;
+        }
+        let tx = self.tx.clone();
+        fetch(ctx, self.client(), method, path, body, move |r| {
+            let _ = tx.send(to_event(r));
+        });
+    }
+
+    /// The desktop: exchanges the tree with the server, then its documents.
+    /// The working copy must already be saved to disk.
     pub fn sync(&mut self, ctx: &egui::Context, resolve: HashMap<String, &'static str>) {
         if self.busy.is_some() {
             return;
@@ -516,12 +572,56 @@ impl Remote {
         });
     }
 
-    /// After the tree: documents both ways.
+    /// The desktop, after the tree: documents both ways.
     pub fn sync_media(&mut self, ctx: &egui::Context) {
         self.busy = Some(Busy::Media);
         let (client, dir, tree, role, known) = (self.client(), self.dir.clone(), self.tree.clone(), self.role(), self.state.media.clone());
         self.spawn(ctx, move || match sync_media(&client, &dir, &tree, role, known) {
             Ok(e) => e,
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    /// The browser: fetches the tree.
+    pub fn load_tree(&mut self, ctx: &egui::Context) {
+        self.news.clear();
+        self.ask(ctx, Some(Busy::Tree), "GET", "/api/tree".into(), None, |r| match success(r).and_then(|r| r.json::<TreeReply>()) {
+            Ok(t) => Event::WebTree { revision: t.revision, gedcom: t.gedcom },
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    /// The browser: saves the edited tree; others' changes come back merged in.
+    pub fn save_tree(&mut self, ctx: &egui::Context, gedcom: String, resolve: HashMap<String, &'static str>) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.news.clear();
+        let body = serde_json::json!({ "base_revision": self.state.base_revision, "gedcom": gedcom, "resolve": resolve });
+        self.ask(ctx, Some(Busy::Tree), "POST", "/api/tree".into(), Some(body), |r| {
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => return Event::Failed(e),
+            };
+            if r.status == 409
+                && let Some(list) = serde_json::from_slice::<serde_json::Value>(&r.body).ok().and_then(|v| v.get("conflicts").cloned())
+            {
+                return match serde_json::from_value(list) {
+                    Ok(c) => Event::Conflicts(c),
+                    Err(e) => Event::Failed(e.to_string()),
+                };
+            }
+            match success(Ok(r)).and_then(|r| r.json::<SaveReply>()) {
+                Ok(s) => Event::WebSaved { revision: s.revision, merged: s.merged, renamed: s.renamed.len(), gedcom: s.gedcom },
+                Err(e) => Event::Failed(e),
+            }
+        });
+    }
+
+    /// The browser: which documents it may show.
+    pub fn load_media(&mut self, ctx: &egui::Context) {
+        self.ask(ctx, None, "GET", "/api/media".into(), None, |r| match success(r).and_then(|r| r.json::<Vec<MediaFile>>()) {
+            Ok(list) => Event::WebMedia(list.into_iter().map(|m| (m.path, m.sha256)).collect()),
             Err(e) => Event::Failed(e),
         });
     }
@@ -539,8 +639,8 @@ impl Remote {
         self.polling = true;
         // Everything after the base revision is someone else's: our own
         // syncs move the base forward.
-        let (client, since) = (self.client(), self.state.base_revision);
-        self.spawn(ctx, move || match client.changes(since, None) {
+        let path = changes_path(self.state.base_revision, None);
+        self.ask(ctx, None, "GET", path, None, |r| match success(r).and_then(|r| r.json()) {
             Ok(rows) => Event::News(rows),
             Err(e) if e == SIGNED_OUT => Event::Failed(e),
             Err(_) => Event::News(Vec::new()),
@@ -553,8 +653,8 @@ impl Remote {
             return;
         }
         self.history_asked.insert(xref.to_string(), self.state.base_revision);
-        let (client, x) = (self.client(), xref.to_string());
-        self.spawn(ctx, move || match client.changes(None, Some(&x)) {
+        let x = xref.to_string();
+        self.ask(ctx, None, "GET", changes_path(None, Some(xref)), None, move |r| match success(r).and_then(|r| r.json()) {
             Ok(rows) => Event::History { xref: x, rows },
             Err(e) if e == SIGNED_OUT => Event::Failed(e),
             Err(_) => Event::History { xref: x, rows: Vec::new() },
@@ -565,12 +665,85 @@ impl Remote {
         self.history_asked.clear();
     }
 
-    /// Runs an account request in the background.
+    pub fn load_accounts(&mut self, ctx: &egui::Context) {
+        self.ask(ctx, Some(Busy::Other), "GET", "/api/users".into(), None, |r| match success(r).and_then(|r| r.json()) {
+            Ok(list) => Event::Accounts(list),
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    pub fn create_account(&mut self, ctx: &egui::Context, username: String, display_name: String, password: String, role: Role) {
+        let body = serde_json::json!({"username": username, "display_name": display_name, "password": password, "role": role});
+        self.ask(ctx, Some(Busy::Other), "POST", "/api/users".into(), Some(body), move |r| match success(r) {
+            Ok(_) => Event::Done(format!("Added {username}.")),
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    pub fn update_account(&mut self, ctx: &egui::Context, id: i32, change: serde_json::Value, done: String) {
+        self.ask(ctx, Some(Busy::Other), "PATCH", format!("/api/users/{id}"), Some(change), move |r| match success(r) {
+            Ok(_) => Event::Done(done),
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    /// A new sign-in for this account; its others end.
+    pub fn change_password(&mut self, ctx: &egui::Context, current: String, new: String) {
+        let body = serde_json::json!({"current": current, "new": new});
+        self.ask(ctx, Some(Busy::Other), "POST", "/api/password".into(), Some(body), |r| match success(r).and_then(|r| r.json::<Session>()) {
+            Ok(s) => Event::PasswordChanged { token: s.token, expires_at: s.expires_at },
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    /// Ends every sign-in of this account, everywhere.
+    pub fn sign_out_everywhere(&mut self, ctx: &egui::Context) {
+        self.ask(ctx, None, "POST", "/api/logout".into(), None, |_| Event::SignedOut);
+    }
+
+    /// Runs a blocking request in the background (the desktop's uploads).
     pub fn request(&mut self, ctx: &egui::Context, job: impl FnOnce(&Client) -> Event + Send + 'static) {
         self.busy = Some(Busy::Other);
         let client = self.client();
         self.spawn(ctx, move || job(&client));
     }
+
+    /// The browser's connection: the page's own server, signed in by cookie.
+    pub fn new_web(server: &str, user: User) -> Self {
+        let state = SyncState { server: server.to_string(), token: String::new(), expires_at: 0, user, base_revision: None, media: BTreeMap::new() };
+        let mut r = Self::new(state, PathBuf::from("/"));
+        r.tree = PathBuf::from("/tree.ged");
+        r
+    }
+}
+
+/// The browser: who's signed in on the page's server. `Ok(None)` when no one
+/// is; `Err` when the server isn't a Genie server with accounts (it's
+/// `genie --serve` on someone's computer).
+pub fn probe(ctx: &egui::Context, server: &str) -> Receiver<Result<Option<User>, ()>> {
+    let (tx, rx) = channel();
+    fetch(ctx, Client::new(server, ""), "GET", "/api/me".into(), None, move |r| {
+        let answer = match r {
+            Ok(r) if r.status == 200 => r.json().map(Some).map_err(|_| ()),
+            Ok(r) if r.status == 401 => Ok(None),
+            Err(e) if e == SIGNED_OUT => Ok(None),
+            _ => Err(()),
+        };
+        let _ = tx.send(answer);
+    });
+    rx
+}
+
+/// The browser: signs in for a session cookie.
+pub fn sign_in_web(ctx: &egui::Context, server: &str, username: &str, password: &str) -> Receiver<Result<Remote, String>> {
+    let (tx, rx) = channel();
+    let body = serde_json::json!({"username": username.trim(), "password": password, "cookie": true});
+    let server_owned = server.to_string();
+    fetch(ctx, Client::new(server, ""), "POST", "/api/login".into(), Some(body), move |r| {
+        let answer = success(r).and_then(|r| r.json::<Session>()).map(|s| Remote::new_web(&server_owned, s.user));
+        let _ = tx.send(answer);
+    });
+    rx
 }
 
 /// Signs in, and makes (or reopens) the working copy for this server and account.
@@ -760,8 +933,11 @@ mod tests {
         let pw = "test-password-1";
 
         let admin = sign_in(&server, "admin", &admin_pw).expect("admin signs in");
-        for (u, n, role) in [("alice", "Alice", Role::Editor), ("bob", "Bob", Role::Editor), ("gus", "Gus", Role::Guest)] {
-            let _ = admin.client().create_account(u, n, pw, role);
+        // Fresh accounts each run, so earlier runs' can't get in the way.
+        let id = std::process::id();
+        let (alice_u, bob_u, gus_u) = (format!("alice{id}"), format!("bob{id}"), format!("gus{id}"));
+        for (u, n, role) in [(&alice_u, "Alice", Role::Editor), (&bob_u, "Bob", Role::Editor), (&gus_u, "Gus", Role::Guest)] {
+            admin.client().create_account(u, n, pw, role).expect("account created");
         }
 
         // Seed: the sample, with one document, as a bundle.
@@ -796,8 +972,8 @@ mod tests {
         };
         let has = |r: &Remote, s: &str| std::fs::read_to_string(&r.tree).unwrap().contains(s);
 
-        let mut alice = sign_in(&server, "alice", pw).unwrap();
-        let mut bob = sign_in(&server, "bob", pw).unwrap();
+        let mut alice = sign_in(&server, &alice_u, pw).unwrap();
+        let mut bob = sign_in(&server, &bob_u, pw).unwrap();
         assert!(matches!(sync(&mut alice, &[]), Event::TreeSynced { reload: true, .. }));
         assert!(has(&alice, "Thomas /Hartwell/"));
         assert_eq!(std::fs::read(alice.dir.join("Family media/thomas.jpg")).unwrap(), b"thomas");
@@ -838,7 +1014,7 @@ mod tests {
         assert_eq!(hist.iter().take(3).map(|h| h.user.clone().unwrap()).collect::<Vec<_>>(), ["Bob", "Alice", "Alice"]);
 
         // A guest's copy has no living people, and no photos of them.
-        let mut gus = sign_in(&server, "gus", pw).unwrap();
+        let mut gus = sign_in(&server, &gus_u, pw).unwrap();
         sync(&mut gus, &[]);
         assert!(!has(&gus, "Ferris") && has(&gus, "Tommy /Hartwell/") && has(&gus, "NAME Private"));
         // A guest's local edit is never sent.

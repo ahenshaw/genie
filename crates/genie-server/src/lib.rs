@@ -37,6 +37,8 @@ pub struct Config {
     pub media_dir: PathBuf,
     /// Born this many years ago or more counts as deceased, for guests.
     pub living_years: i32,
+    /// The browser app (a trunk bundle), served at `/` when set.
+    pub web_dir: Option<PathBuf>,
 }
 
 pub struct AppState {

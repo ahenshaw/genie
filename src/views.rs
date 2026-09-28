@@ -358,7 +358,7 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                         ui.label(RichText::new(format!("{verb} by {who} · {}", last.day())).size(12.5).color(p.text_faint));
                     }
                 });
-                let read_only = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("genie_read_only"))).unwrap_or(false);
+                let read_only = crate::widgets::read_only(ui.ctx());
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                     let more = ui.add(Button::new("⋯").outline().size(ButtonSize::Small));
                     Menu::new("profile_more").show_below(&more, |ui| {

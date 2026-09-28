@@ -19,7 +19,8 @@ use crate::{State, media, store};
 const MAX_TREE: usize = 64 * 1024 * 1024;
 
 pub fn router(state: State) -> Router {
-    Router::new()
+    let web = state.config.web_dir.clone();
+    let api = Router::new()
         .route("/api/login", post(login))
         .route("/api/logout", post(logout))
         .route("/api/me", get(me))
@@ -31,7 +32,29 @@ pub fn router(state: State) -> Router {
         .route("/api/media", get(media::manifest).put(media::upload).layer(DefaultBodyLimit::disable()))
         .route("/api/media/{sha}", get(media::download))
         .route("/api/import", post(media::import).layer(DefaultBodyLimit::disable()))
-        .with_state(state)
+        .with_state(state);
+    // The browser app, when it's installed: everything that isn't the API.
+    let app = match web {
+        Some(dir) => api.fallback_service(tower_http::services::ServeDir::new(dir)),
+        None => api,
+    };
+    app.layer(axum::middleware::from_fn(response_headers))
+}
+
+/// Security headers on everything, and caching for the app's files: its
+/// page is checked every time, while trunk names the rest by content hash.
+async fn response_headers(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let path = req.uri().path().to_string();
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(header::X_CONTENT_TYPE_OPTIONS, header::HeaderValue::from_static("nosniff"));
+    h.insert(header::X_FRAME_OPTIONS, header::HeaderValue::from_static("DENY"));
+    h.insert(header::REFERRER_POLICY, header::HeaderValue::from_static("same-origin"));
+    if !path.starts_with("/api/") && !h.contains_key(header::CACHE_CONTROL) {
+        let cache = if path == "/" || path.ends_with(".html") { "no-cache" } else { "public, max-age=31536000, immutable" };
+        h.insert(header::CACHE_CONTROL, header::HeaderValue::from_static(cache));
+    }
+    resp
 }
 
 // ---- sessions ----------------------------------------------------------------------------
@@ -40,6 +63,9 @@ pub fn router(state: State) -> Router {
 struct Login {
     username: String,
     password: String,
+    /// A browser: also set the session cookie.
+    #[serde(default)]
+    cookie: bool,
 }
 
 #[derive(Serialize)]
@@ -49,7 +75,7 @@ struct Session {
     user: CurrentUser,
 }
 
-async fn login(AxState(st): AxState<State>, ip: ClientIp, Json(req): Json<Login>) -> ApiResult<Json<Session>> {
+async fn login(AxState(st): AxState<State>, ip: ClientIp, Json(req): Json<Login>) -> ApiResult<Response> {
     let username = req.username.trim().to_lowercase();
     let mut keys = vec![format!("u:{username}")];
     if let Some(ip) = ip.0 {
@@ -77,17 +103,19 @@ async fn login(AxState(st): AxState<State>, ip: ClientIp, Json(req): Json<Login>
     sqlx::query("UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?").bind(id).execute(&st.pool).await?;
     let role = Role::parse(&role).ok_or_else(|| ApiError::internal("unknown role"))?;
     let expires_at = auth::now() + auth::TOKEN_LIFETIME;
-    Ok(Json(Session {
-        token: auth::mint_token(&st.config.session_secret, id, epoch, expires_at),
-        expires_at,
-        user: CurrentUser { id, username, display_name, role },
-    }))
+    let token = auth::mint_token(&st.config.session_secret, id, epoch, expires_at);
+    let cookie = req.cookie.then(|| auth::session_cookie(Some(&token)));
+    let session = Json(Session { token, expires_at, user: CurrentUser { id, username, display_name, role } });
+    Ok(match cookie {
+        Some(c) => ([(header::SET_COOKIE, c)], session).into_response(),
+        None => session.into_response(),
+    })
 }
 
 /// Signs the account out everywhere: every token it holds stops working.
-async fn logout(AxState(st): AxState<State>, user: CurrentUser) -> ApiResult<StatusCode> {
+async fn logout(AxState(st): AxState<State>, user: CurrentUser) -> ApiResult<Response> {
     sqlx::query("UPDATE users SET session_epoch = session_epoch + 1 WHERE id = ?").bind(user.id).execute(&st.pool).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok((StatusCode::NO_CONTENT, [(header::SET_COOKIE, auth::session_cookie(None))]).into_response())
 }
 
 async fn me(user: CurrentUser) -> Json<CurrentUser> {
@@ -101,7 +129,7 @@ struct PasswordChange {
 }
 
 /// Changes your own password; other sessions end, and this one gets a new token.
-async fn change_password(AxState(st): AxState<State>, user: CurrentUser, Json(req): Json<PasswordChange>) -> ApiResult<Json<Session>> {
+async fn change_password(AxState(st): AxState<State>, user: CurrentUser, headers: HeaderMap, Json(req): Json<PasswordChange>) -> ApiResult<Response> {
     auth::check_new_password(&req.new)?;
     let (hash,): (String,) = sqlx::query_as("SELECT password_hash FROM users WHERE id = ?").bind(user.id).fetch_one(&st.pool).await?;
     let current = req.current;
@@ -115,7 +143,14 @@ async fn change_password(AxState(st): AxState<State>, user: CurrentUser, Json(re
     sqlx::query("UPDATE users SET password_hash = ?, session_epoch = session_epoch + 1 WHERE id = ?").bind(&new_hash).bind(user.id).execute(&st.pool).await?;
     let (epoch,): (i32,) = sqlx::query_as("SELECT session_epoch FROM users WHERE id = ?").bind(user.id).fetch_one(&st.pool).await?;
     let expires_at = auth::now() + auth::TOKEN_LIFETIME;
-    Ok(Json(Session { token: auth::mint_token(&st.config.session_secret, user.id, epoch, expires_at), expires_at, user }))
+    let token = auth::mint_token(&st.config.session_secret, user.id, epoch, expires_at);
+    // A browser's cookie held the old token, which just stopped working.
+    let cookie = headers.contains_key(header::COOKIE).then(|| auth::session_cookie(Some(&token)));
+    let session = Json(Session { token, expires_at, user });
+    Ok(match cookie {
+        Some(c) => ([(header::SET_COOKIE, c)], session).into_response(),
+        None => session.into_response(),
+    })
 }
 
 // ---- accounts (admin) -----------------------------------------------------------------------
