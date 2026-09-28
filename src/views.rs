@@ -591,6 +591,14 @@ fn event_color(p: &elegance::Palette, tag: &str) -> Color32 {
 
 fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>) {
     let p = Theme::current(ui.ctx()).palette;
+    let path = crate::homepath::find(ui.ctx(), doc, xref);
+    let toward_home = |ui: &Ui, r: &egui::Response, x: &str| {
+        if let Some(h) = &path
+            && h.next() == Some(x)
+        {
+            mark_toward_home(ui, r, doc, h.home());
+        }
+    };
     Card::new().heading("Family").show(ui, |ui| {
         ui.spacing_mut().item_spacing.y = 6.0;
         section_label(ui, "Parents");
@@ -601,6 +609,7 @@ fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action
         match &father {
             Some(f) => {
                 let r = person_chip(ui, doc, f, Some("Father"));
+                toward_home(ui, &r, f);
                 chip_actions(&r, doc, f, fam0, actions);
             }
             None => {
@@ -612,6 +621,7 @@ fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action
         match &mother {
             Some(m) => {
                 let r = person_chip(ui, doc, m, Some("Mother"));
+                toward_home(ui, &r, m);
                 chip_actions(&r, doc, m, fam0, actions);
             }
             None => {
@@ -626,6 +636,7 @@ fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action
         for s in &sibs {
             let fam = pfams.iter().find(|f| doc.children(f).contains(s)).map(String::as_str);
             let r = person_chip(ui, doc, s, None);
+            toward_home(ui, &r, s);
             chip_actions(&r, doc, s, fam, actions);
         }
         if add_chip(ui, "Add sibling").clicked() {
@@ -649,6 +660,7 @@ fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action
             match doc.spouse_in(f, xref) {
                 Some(s) => {
                     let r = person_chip(ui, doc, &s, None);
+                    toward_home(ui, &r, &s);
                     chip_actions(&r, doc, &s, Some(f), actions);
                 }
                 None => {
@@ -664,6 +676,7 @@ fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action
             ui.indent(("kids", f), |ui| {
                 for k in &kids {
                     let r = person_chip(ui, doc, k, None);
+                    toward_home(ui, &r, k);
                     chip_actions(&r, doc, k, Some(f), actions);
                 }
                 if add_chip(ui, "Add child").clicked() {
@@ -683,6 +696,20 @@ fn family_card(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action
             actions.push(Action::AddRelative(xref.to_string(), Relation::Spouse));
         }
     });
+}
+
+/// Outlines a relative's chip in the home-path colour, with a house at its
+/// right, when they're the next step back to the home person.
+fn mark_toward_home(ui: &Ui, r: &egui::Response, doc: &Document, home: &str) {
+    let p = Theme::current(ui.ctx()).palette;
+    let color = crate::homepath::color(&p);
+    // The response can span the row; the chip itself is narrower.
+    let rect = egui::Rect::from_min_size(r.rect.min, egui::vec2(r.rect.width().min(crate::widgets::CHIP_MAX_W), r.rect.height()));
+    ui.painter().rect_stroke(rect, 8, egui::Stroke::new(2.0, color), egui::StrokeKind::Inside);
+    let at = egui::pos2(rect.right() - 16.0, rect.center().y);
+    ui.painter().text(at, egui::Align2::CENTER_CENTER, glyphs::HOME.to_string(), egui::FontId::proportional(14.0), color);
+    let name = doc.person(home).map(|p| p.display.as_str()).unwrap_or("home");
+    r.clone().on_hover_text(format!("On the way back to {name}"));
 }
 
 fn chip_actions(r: &egui::Response, doc: &Document, xref: &str, fam: Option<&str>, actions: &mut Vec<Action>) {

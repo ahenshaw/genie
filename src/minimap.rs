@@ -8,6 +8,7 @@ use egui::{Align2, Color32, FontId, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
 use elegance::{Button, ButtonSize, Card, Theme, glyphs};
 
 use crate::app::Action;
+use crate::homepath::{self, HomePath};
 use crate::model::{Document, PersonSummary, Relation};
 use crate::tidy::{self, TidyNode};
 use crate::widgets::{mix, paint_avatar, sex_color};
@@ -157,6 +158,7 @@ struct Map<'a> {
     doc: &'a Document,
     actions: &'a mut Vec<Action>,
     interactive: bool,
+    home: Option<&'a str>,
 }
 
 impl Map<'_> {
@@ -171,6 +173,8 @@ impl Map<'_> {
             ui.painter().circle_stroke(center, radius + 2.5, Stroke::new(1.75, p.focus));
         } else if resp.hovered() {
             ui.painter().circle_stroke(center, radius + 3.0, Stroke::new(1.5, mix(p.border, p.focus, 0.7)));
+        } else if self.home == Some(xref) {
+            ui.painter().circle_stroke(center, radius + 2.5, Stroke::new(1.75, homepath::color(&p)));
         }
         if radius >= 10.0 {
             paint_avatar(ui, center, radius, person);
@@ -218,7 +222,8 @@ fn hover_card(ui: &mut Ui, person: &PersonSummary) {
 
 /// Right-angled connector, as in the Tree view: a trunk from `from` to a
 /// horizontal bus halfway to the branches, then a drop to each branch.
-fn elbow(ui: &Ui, from: Pos2, branches: &[(Pos2, Color32)], trunk: Color32) {
+/// `path` picks out the branch on the way home, drawn over the rest.
+fn elbow(ui: &Ui, from: Pos2, branches: &[(Pos2, Color32)], trunk: Color32, path: Option<(usize, Color32)>) {
     let Some(first) = branches.first() else { return };
     let painter = ui.painter();
     let snap = |p: Pos2| pos2(painter.round_to_pixel_center(p.x), painter.round_to_pixel_center(p.y));
@@ -233,6 +238,32 @@ fn elbow(ui: &Ui, from: Pos2, branches: &[(Pos2, Color32)], trunk: Color32) {
         let to = snap(*to);
         painter.line_segment([pos2(to.x, bus_y), to], stroke(*color));
     }
+    if let Some((i, color)) = path
+        && let Some((to, _)) = branches.get(i)
+    {
+        let to = snap(*to);
+        let hl = Stroke::new(2.0, color);
+        painter.line_segment([from, pos2(from.x, bus_y)], hl);
+        painter.line_segment([pos2(from.x, bus_y), pos2(to.x, bus_y)], hl);
+        painter.line_segment([pos2(to.x, bus_y), to], hl);
+    }
+}
+
+/// Up to `max` of `all`, always including `keep` (the way home) when it's
+/// there. Returns those shown and how many were left out.
+fn pick(all: &[String], max: usize, keep: Option<&String>) -> (Vec<String>, usize) {
+    let mut shown: Vec<String> = all.iter().take(max).cloned().collect();
+    if let Some(k) = keep
+        && all.contains(k)
+        && !shown.contains(k)
+    {
+        shown.pop();
+        // Keep birth order: put it where it falls among those shown.
+        let at = all.iter().position(|x| x == k).unwrap_or(0).min(shown.len());
+        shown.insert(at, k.clone());
+    }
+    let hidden = all.len() - shown.len();
+    (shown, hidden)
 }
 
 /// A circle in the map's layout.
@@ -326,6 +357,11 @@ pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, 
     let p = Theme::current(ui.ctx()).palette;
     let line = mix(p.border, p.text_faint, 0.35);
     let faint = mix(line, p.card, 0.5);
+    let home_color = homepath::color(&p);
+    let path: Option<std::sync::Arc<HomePath>> = if opts.interactive { homepath::find(ui.ctx(), doc, xref) } else { None };
+    let path = path.as_deref();
+    let joins = |a: &str, b: &str| path.is_some_and(|h| h.joins(a, b));
+    let down = path.map(|h| h.down_line()).unwrap_or(&[]);
 
     // Ancestors, laid out compactly around the root at x = 0: every known
     // generation, plus a row of "add" slots where those are wanted.
@@ -336,43 +372,96 @@ pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, 
     push_ancestors(&mut anc, doc, xref, root, 0, up, opts.empty_slots, &mut Vec::new());
     let anc_x = tidy::layout(&anc.nodes, root, DOT_GAP);
 
-    // Descendants, laid out around the hub the children hang from.
+    // Partners and descendants. With more than one partner the first sits
+    // left of the root and the rest to the right, and each couple's
+    // children hang from their own link, on their own side, so it's plain
+    // who is whose.
     let fams = doc.spouse_families(xref);
-    let spouses: Vec<String> = fams.iter().filter_map(|f| doc.spouse_in(f, xref)).take(2).collect();
-    let kids: Vec<String> = if opts.descendants { fams.iter().flat_map(|f| doc.children(f)).collect() } else { Vec::new() };
+    let sides = fams.len() >= 2;
+    let spouse_x = |j: usize| match (sides, j) {
+        (true, 0) => -(SPOUSE_GAP + 6.0),
+        (true, j) => SPOUSE_GAP * j as f32 + 6.0,
+        (false, j) => SPOUSE_GAP * (j + 1) as f32 + 6.0,
+    };
+    let spouses: Vec<(String, f32)> = fams
+        .iter()
+        .enumerate()
+        .filter_map(|(j, f)| doc.spouse_in(f, xref).map(|s| (s, spouse_x(j))))
+        .collect();
+    let with_kids = fams.iter().filter(|f| !doc.children(f).is_empty()).count().max(1);
+    let cap = (MAX_CHILDREN / with_kids).max(4);
     let mut desc = DotTree::default();
-    let hub = desc.push(Dot::Hub, 0.0, 0);
-    for k in kids.iter().take(MAX_CHILDREN) {
-        let c = desc.push(Dot::Person(k.clone()), CHILD_R * 2.0, 1);
-        desc.nodes[hub].children.push(c);
-        let gk: Vec<String> = doc.spouse_families(k).iter().flat_map(|f| doc.children(f)).collect();
-        for g in gk.iter().take(MAX_GRANDCHILDREN_EACH) {
-            let gc = desc.push(Dot::Person(g.clone()), GRANDCHILD_R * 2.0, 2);
-            desc.nodes[c].children.push(gc);
+    // Per family: its hub, the nodes it owns, and where its children hang from.
+    let mut groups: Vec<(usize, std::ops::Range<usize>, f32)> = Vec::new();
+    for (j, f) in fams.iter().enumerate() {
+        let kids = if opts.descendants { doc.children(f) } else { Vec::new() };
+        if kids.is_empty() {
+            continue;
         }
-        if gk.len() > MAX_GRANDCHILDREN_EACH {
-            let m = desc.push(Dot::More(gk.len() - MAX_GRANDCHILDREN_EACH), MORE_W, 2);
-            desc.nodes[c].children.push(m);
+        let start = desc.nodes.len();
+        let hub = desc.push(Dot::Hub, 0.0, 0);
+        let (shown_kids, more_kids) = pick(&kids, cap, down.first());
+        for k in &shown_kids {
+            let c = desc.push(Dot::Person(k.clone()), CHILD_R * 2.0, 1);
+            desc.nodes[hub].children.push(c);
+            let gk: Vec<String> = doc.spouse_families(k).iter().flat_map(|f| doc.children(f)).collect();
+            let (shown, more) = pick(&gk, MAX_GRANDCHILDREN_EACH, down.get(1));
+            for g in shown {
+                let gc = desc.push(Dot::Person(g), GRANDCHILD_R * 2.0, 2);
+                desc.nodes[c].children.push(gc);
+            }
+            if more > 0 {
+                let m = desc.push(Dot::More(more), MORE_W, 2);
+                desc.nodes[c].children.push(m);
+            }
+        }
+        if more_kids > 0 {
+            let m = desc.push(Dot::More(more_kids), MORE_W, 1);
+            desc.nodes[hub].children.push(m);
+        }
+        // Midway along the couple's link; from the root when the other
+        // parent is unknown.
+        let anchor = if doc.spouse_in(f, xref).is_some() { spouse_x(j) / 2.0 } else { 0.0 };
+        groups.push((hub, start..desc.nodes.len(), anchor));
+    }
+    // Each family centred under its couple, then pushed outward until the
+    // left family ends left of the root and the rest start right of it.
+    let mut desc_x = vec![0.0; desc.nodes.len()];
+    let split = sides && groups.len() >= 2 && groups[0].2 < 0.0;
+    let mut right_edge = -DOT_GAP / 2.0;
+    for (g, (hub, range, anchor)) in groups.iter().enumerate() {
+        let xs = tidy::layout(&desc.nodes, *hub, DOT_GAP);
+        let lo_f = range.clone().map(|i| xs[i] - desc.nodes[i].size / 2.0).fold(0.0, f32::min);
+        let hi_f = range.clone().map(|i| xs[i] + desc.nodes[i].size / 2.0).fold(0.0, f32::max);
+        let offset = match (split, g) {
+            (false, _) => *anchor,
+            (true, 0) => anchor.min(-DOT_GAP / 2.0 - hi_f),
+            (true, _) => anchor.max(right_edge + DOT_GAP - lo_f),
+        };
+        if split {
+            right_edge = if g == 0 { -DOT_GAP / 2.0 } else { offset + hi_f };
+        }
+        for i in range.clone() {
+            desc_x[i] = offset + xs[i];
         }
     }
-    if kids.len() > MAX_CHILDREN {
-        let m = desc.push(Dot::More(kids.len() - MAX_CHILDREN), MORE_W, 1);
-        desc.nodes[hub].children.push(m);
-    }
-    let desc_x = tidy::layout(&desc.nodes, hub, DOT_GAP);
     let down = desc.generation.iter().copied().max().unwrap_or(0);
-    let hub_offset = if spouses.is_empty() { 0.0 } else { SPOUSE_GAP / 2.0 + 3.0 };
+    let anchor_of: HashMap<usize, f32> = groups.iter().map(|(hub, _, a)| (*hub, *a)).collect();
 
     // Horizontal extent of everything, relative to the root.
     let mut lo = -ancestor_radius(0);
-    let mut hi = ancestor_radius(0) + spouses.len() as f32 * SPOUSE_GAP + if spouses.is_empty() { 0.0 } else { 6.0 + SPOUSE_R };
+    let mut hi = ancestor_radius(0);
+    for (_, x) in &spouses {
+        lo = lo.min(x - SPOUSE_R);
+        hi = hi.max(x + SPOUSE_R);
+    }
     for (i, n) in anc.nodes.iter().enumerate() {
         lo = lo.min(anc_x[i] - n.size / 2.0);
         hi = hi.max(anc_x[i] + n.size / 2.0);
     }
     for (i, n) in desc.nodes.iter().enumerate() {
-        lo = lo.min(hub_offset + desc_x[i] - n.size / 2.0);
-        hi = hi.max(hub_offset + desc_x[i] + n.size / 2.0);
+        lo = lo.min(desc_x[i] - n.size / 2.0);
+        hi = hi.max(desc_x[i] + n.size / 2.0);
     }
 
     // Shrink to fit the width (and height, if limited); never enlarge.
@@ -389,10 +478,10 @@ pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, 
     let r_of = |r: f32| (r * scale).max(if opts.max_height.is_some() { 2.0 } else { 3.0 });
     let row_y = |row: isize| rect.top() + row_h / 2.0 + (row + up as isize) as f32 * row_h;
     let anc_pos = |i: usize| pos2(x_of(anc_x[i]), row_y(-(anc.generation[i] as isize)));
-    let desc_pos = |i: usize| pos2(x_of(hub_offset + desc_x[i]), row_y(desc.generation[i] as isize));
+    let desc_pos = |i: usize| pos2(x_of(desc_x[i]), row_y(desc.generation[i] as isize));
     let root_pos = anc_pos(root);
 
-    let mut map = Map { doc, actions, interactive: opts.interactive };
+    let mut map = Map { doc, actions, interactive: opts.interactive, home: path.map(|h| h.home()) };
 
     // Ancestor links: each person up to a bar joining their two parents.
     for (i, n) in anc.nodes.iter().enumerate() {
@@ -404,7 +493,11 @@ pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, 
             .iter()
             .map(|&c| (anc_pos(c), if matches!(anc.dots[c], Dot::Person(_)) { line } else { faint }))
             .collect();
-        elbow(ui, anc_pos(i), &branches, line);
+        let on_path = match &anc.dots[i] {
+            Dot::Person(x) => n.children.iter().position(|&c| matches!(&anc.dots[c], Dot::Person(y) if joins(x, y))),
+            _ => None,
+        };
+        elbow(ui, anc_pos(i), &branches, line, on_path.map(|b| (b, home_color)));
     }
     for (i, dot) in anc.dots.iter().enumerate().skip(1) {
         let r = r_of(ancestor_radius(anc.generation[i]));
@@ -417,14 +510,18 @@ pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, 
 
     // Descendant links, then dots: children hang from the partner link.
     for (i, n) in desc.nodes.iter().enumerate() {
-        let from = if i == hub { pos2(x_of(hub_offset), root_pos.y) } else { desc_pos(i) };
-        let branches: Vec<(Pos2, Color32)> = n
-            .children
-            .iter()
-            .filter(|&&c| matches!(desc.dots[c], Dot::Person(_)))
-            .map(|&c| (desc_pos(c), line))
-            .collect();
-        elbow(ui, from, &branches, line);
+        let from = match anchor_of.get(&i) {
+            Some(a) => pos2(x_of(*a), root_pos.y),
+            None => desc_pos(i),
+        };
+        let people: Vec<usize> = n.children.iter().copied().filter(|&c| matches!(desc.dots[c], Dot::Person(_))).collect();
+        let branches: Vec<(Pos2, Color32)> = people.iter().map(|&c| (desc_pos(c), line)).collect();
+        let parent = match &desc.dots[i] {
+            Dot::Person(x) => x.as_str(),
+            _ => xref,
+        };
+        let on_path = people.iter().position(|&c| matches!(&desc.dots[c], Dot::Person(y) if joins(parent, y)));
+        elbow(ui, from, &branches, line, on_path.map(|b| (b, home_color)));
     }
     for (i, dot) in desc.dots.iter().enumerate() {
         match dot {
@@ -440,11 +537,36 @@ pub fn draw(ui: &mut Ui, doc: &Document, xref: &str, actions: &mut Vec<Action>, 
     }
 
     // The couple last, over the links that leave them.
-    for (i, s) in spouses.iter().enumerate() {
-        let c = pos2(x_of(SPOUSE_GAP * (i + 1) as f32 + 6.0), root_pos.y);
-        let link_from = root_pos + vec2(r_of(ancestor_radius(0)) + 1.0, 0.0);
-        ui.painter().line_segment([link_from, c - vec2(r_of(SPOUSE_R), 0.0)], Stroke::new(1.5, mix(p.purple, p.border, 0.3)));
+    let r0 = r_of(ancestor_radius(0));
+    for (s, x) in &spouses {
+        let c = pos2(x_of(*x), root_pos.y);
+        let dir = if *x < 0.0 { -1.0 } else { 1.0 };
+        let stroke = if joins(xref, s) { Stroke::new(2.0, home_color) } else { Stroke::new(1.5, mix(p.purple, p.border, 0.3)) };
+        ui.painter().line_segment([root_pos + vec2(dir * (r0 + 1.0), 0.0), c - vec2(dir * r_of(SPOUSE_R), 0.0)], stroke);
         map.node(ui, c, r_of(SPOUSE_R), s, false);
     }
     map.node(ui, root_pos, r_of(ancestor_radius(0)), xref, true);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick;
+
+    fn names(n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("P{i}")).collect()
+    }
+
+    #[test]
+    fn pick_keeps_the_way_home() {
+        let all = names(9);
+        assert_eq!(pick(&all, 6, None), (names(6), 3));
+        // Already shown: nothing changes.
+        assert_eq!(pick(&all, 6, Some(&"P2".to_string())), (names(6), 3));
+        // Beyond the cut: it replaces the last shown, in birth order.
+        let (shown, hidden) = pick(&all, 6, Some(&"P8".to_string()));
+        assert_eq!(shown, ["P0", "P1", "P2", "P3", "P4", "P8"]);
+        assert_eq!(hidden, 3);
+        // Someone not among them is ignored.
+        assert_eq!(pick(&all, 6, Some(&"X".to_string())), (names(6), 3));
+    }
 }

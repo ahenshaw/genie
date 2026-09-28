@@ -93,6 +93,9 @@ pub fn fit_text(ui: &Ui, text: &str, font: &FontId, width: f32) -> String {
     "…".into()
 }
 
+/// Widest a [`person_chip`] is drawn.
+pub const CHIP_MAX_W: f32 = 360.0;
+
 /// A clickable card showing one person. Returns the click response.
 pub fn person_chip(ui: &mut Ui, doc: &Document, xref: &str, caption: Option<&str>) -> Response {
     let Some(person) = doc.person(xref) else {
@@ -100,7 +103,7 @@ pub fn person_chip(ui: &mut Ui, doc: &Document, xref: &str, caption: Option<&str
     };
     let theme = Theme::current(ui.ctx());
     let p = &theme.palette;
-    let width = ui.available_width().clamp(160.0, 360.0);
+    let width = ui.available_width().clamp(160.0, CHIP_MAX_W);
     let height = 48.0;
     let (rect, resp) = ui.allocate_exact_size(vec2(width, height), Sense::click());
     if ui.is_rect_visible(rect) {

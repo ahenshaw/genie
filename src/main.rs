@@ -6,6 +6,7 @@ mod dedup;
 mod fonts;
 mod gedcom;
 mod graph;
+mod homepath;
 mod kinship;
 mod media;
 mod mediaview;

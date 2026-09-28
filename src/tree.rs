@@ -5,6 +5,7 @@
 //! 1:1 and scaled as a bitmap layer, so text stays crisp at every zoom.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use egui::epaint::CubicBezierShape;
 use egui::{
@@ -15,6 +16,7 @@ use elegance::{Button, ButtonSize, Segment, SegmentedControl, SegmentedSize, The
 
 use crate::app::Action;
 use crate::fonts;
+use crate::homepath::{self, HomePath};
 use crate::model::{Document, PersonSummary, Relation};
 use crate::tidy::{self, TidyNode};
 use crate::views::person_context_menu;
@@ -66,6 +68,8 @@ impl Default for TreeView {
 struct Canvas<'a> {
     doc: &'a Document,
     root: &'a str,
+    /// The way back to the home person, highlighted and never cut short.
+    path: Option<Arc<HomePath>>,
     actions: &'a mut Vec<Action>,
     origin: Pos2,
     zoom: f32,
@@ -143,7 +147,8 @@ impl TreeView {
                     child.set_invisible();
                 }
                 let bounds = {
-                    let mut canvas = Canvas { doc, root, actions, origin: rect.min + self.pan, zoom: self.zoom, clip: rect };
+                    let path = homepath::find(ui.ctx(), doc, root);
+                    let mut canvas = Canvas { doc, root, path, actions, origin: rect.min + self.pan, zoom: self.zoom, clip: rect };
                     match self.mode {
                         MODE_ANCESTORS => canvas.ancestors(&mut child, gens),
                         MODE_BOTH => canvas.hourglass(&mut child, gens),
@@ -228,6 +233,30 @@ impl Canvas<'_> {
         self.zoom >= DETAIL_ZOOM
     }
 
+    /// Whether the link between `a` and `b` is on the way home.
+    fn on_path(&self, a: &str, b: &str) -> bool {
+        self.path.as_ref().is_some_and(|h| h.joins(a, b))
+    }
+
+    /// Where the way home continues down from `x`, if it runs through `x`'s
+    /// children.
+    fn next_home_child(&self, x: &str) -> Option<&str> {
+        let line = self.path.as_ref()?.down_line();
+        if x == self.root {
+            return line.first().map(String::as_str);
+        }
+        let i = line.iter().position(|y| y == x)?;
+        line.get(i + 1).map(String::as_str)
+    }
+
+    fn path_stroke(&self, ui: &Ui) -> Stroke {
+        self.stroke(3.0, homepath::color(&Theme::current(ui.ctx()).palette))
+    }
+
+    fn is_home(&self, xref: &str) -> bool {
+        self.path.as_ref().is_some_and(|h| h.home() == xref)
+    }
+
     fn person_box(&mut self, ui: &mut Ui, world: Rect, xref: &str) {
         let rect = self.rect(world);
         if !rect.intersects(self.clip) {
@@ -246,6 +275,8 @@ impl Canvas<'_> {
         let fill = if hovered { mix(p.card, p.focus, 0.06) } else { p.card };
         let stroke = if is_root {
             Stroke::new(2.0, p.focus)
+        } else if self.is_home(xref) {
+            Stroke::new(2.0, homepath::color(&p))
         } else if hovered {
             Stroke::new(1.5, mix(p.border, p.focus, 0.6))
         } else {
@@ -266,6 +297,10 @@ impl Canvas<'_> {
             ui.painter().text(self.pt(pos2(x, name_y)), Align2::LEFT_CENTER, name, name_font, p.text);
             if !life.is_empty() {
                 ui.painter().text(self.pt(pos2(x, world.top() + 43.0)), Align2::LEFT_CENTER, life, self.font(12.0), p.text_muted);
+            }
+            if self.is_home(xref) {
+                let at = self.pt(pos2(world.right() - 14.0, world.top() + 14.0));
+                ui.painter().text(at, Align2::CENTER_CENTER, glyphs::HOME.to_string(), self.font(13.0), homepath::color(&p));
             }
         } else {
             painter.rect_filled(rect.shrink(self.px(14.0)), self.radius(4.0), mix(p.card, accent, 0.35));
@@ -389,9 +424,10 @@ impl Canvas<'_> {
                 let from = center(i) + vec2(BOX_W / 2.0, 0.0);
                 let to = center(c) - vec2(BOX_W / 2.0, 0.0);
                 let color = if matches!(t.slots[c], Slot::Person(_)) { mix(p.border, p.text_faint, 0.5) } else { p.border };
+                let stroke = if t.joins(i, c, |a, b| self.on_path(a, b)) { self.path_stroke(ui) } else { self.stroke(1.5, color) };
                 let mid = (from.x + to.x) / 2.0;
                 let pts = [from, pos2(mid, from.y), pos2(mid, to.y), to].map(|q| self.pt(q));
-                ui.painter().add(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, self.stroke(1.5, color)));
+                ui.painter().add(CubicBezierShape::from_points_stroke(pts, false, Color32::TRANSPARENT, stroke));
             }
         }
         let mut bounds = Rect::NOTHING;
@@ -433,6 +469,13 @@ impl Canvas<'_> {
                 let stroke = self.stroke(1.5, color);
                 self.line(ui, pos2(child_top.x, bus_y), pos2(parent_bottom.x, bus_y), stroke);
                 self.line(ui, pos2(parent_bottom.x, bus_y), parent_bottom, stroke);
+            }
+            if let Some(&c) = n.children.iter().find(|&&c| t.joins(i, c, |a, b| self.on_path(a, b))) {
+                let parent_bottom = center(c) + vec2(0.0, height(c) / 2.0);
+                let hl = self.path_stroke(ui);
+                self.line(ui, child_top, pos2(child_top.x, bus_y), hl);
+                self.line(ui, pos2(child_top.x, bus_y), pos2(parent_bottom.x, bus_y), hl);
+                self.line(ui, pos2(parent_bottom.x, bus_y), parent_bottom, hl);
             }
         }
         let mut bounds = Rect::NOTHING;
@@ -487,14 +530,25 @@ impl Canvas<'_> {
         t.nodes.push(TidyNode::new(width));
         let u = t.units.len();
         let fams = self.families_of(&x);
-        let hidden = if !repeat && depth + 1 >= gens { fams.iter().map(|f| f.2.len()).sum() } else { 0 };
+        let total: usize = fams.iter().map(|f| f.2.len()).sum();
+        // Past the generation limit only the way home carries on.
+        let beyond = depth + 1 >= gens;
+        let follow = if beyond { self.next_home_child(&x).map(str::to_string) } else { None };
+        let hidden = if repeat || !beyond {
+            0
+        } else {
+            total - usize::from(follow.is_some())
+        };
         t.units.push(Unit { xref: x, depth, family, width, repeat, hidden, kids: Vec::new(), place: Place::Node(n) });
-        if repeat || depth + 1 >= gens {
+        if repeat || (beyond && follow.is_none()) {
             return (u, n);
         }
         let mut kids = Vec::new();
         for (fi, (_, _, children)) in fams.iter().enumerate() {
             for k in children {
+                if follow.as_ref().is_some_and(|f| f != k) {
+                    continue;
+                }
                 kids.push(self.push_descendant(t, k.clone(), depth + 1, fi, gens, seen));
             }
         }
@@ -536,9 +590,10 @@ impl Canvas<'_> {
             let mut drops = Vec::new();
             let mut slot = 1;
             for (_, sp, _) in self.families_of(&u.xref) {
-                if sp.is_some() {
+                if let Some(sp) = sp {
                     let r_left = me.left() + slot as f32 * (BOX_W + COUPLE_GAP);
-                    self.line(ui, pos2(r_left - COUPLE_GAP, me.center().y), pos2(r_left, me.center().y), link);
+                    let stroke = if self.on_path(&u.xref, &sp) { self.path_stroke(ui) } else { link };
+                    self.line(ui, pos2(r_left - COUPLE_GAP, me.center().y), pos2(r_left, me.center().y), stroke);
                     drops.push(pos2(r_left - COUPLE_GAP / 2.0, me.center().y));
                     slot += 1;
                 } else {
@@ -549,6 +604,8 @@ impl Canvas<'_> {
             for (fi, from) in drops.iter().enumerate() {
                 let kids: Vec<usize> = u.kids.iter().copied().filter(|&c| t.units[c].family == fi).collect();
                 let Some(&first) = kids.first() else { continue };
+                let home_kid = kids.iter().copied().find(|&c| self.on_path(&u.xref, &t.units[c].xref));
+                let hl = self.path_stroke(ui);
                 self.line(ui, *from, pos2(from.x, bus_y), line);
                 if let Place::Stacked { .. } = t.units[first].place {
                     // A spine down the left of the column, a stub to each box.
@@ -560,6 +617,13 @@ impl Canvas<'_> {
                         let r = t.person_rect(c);
                         self.line(ui, pos2(spine_x, r.center().y), r.left_center(), line);
                     }
+                    if let Some(c) = home_kid {
+                        let r = t.person_rect(c);
+                        self.line(ui, *from, pos2(from.x, bus_y), hl);
+                        self.line(ui, pos2(from.x, bus_y), pos2(spine_x, bus_y), hl);
+                        self.line(ui, pos2(spine_x, bus_y), pos2(spine_x, r.center().y), hl);
+                        self.line(ui, pos2(spine_x, r.center().y), r.left_center(), hl);
+                    }
                 } else {
                     let tops: Vec<Pos2> = kids.iter().map(|&c| t.person_rect(c).center_top()).collect();
                     let lo = tops.iter().map(|q| q.x).fold(from.x, f32::min);
@@ -567,6 +631,12 @@ impl Canvas<'_> {
                     self.line(ui, pos2(lo, bus_y), pos2(hi, bus_y), line);
                     for top in tops {
                         self.line(ui, pos2(top.x, bus_y), top, line);
+                    }
+                    if let Some(c) = home_kid {
+                        let top = t.person_rect(c).center_top();
+                        self.line(ui, *from, pos2(from.x, bus_y), hl);
+                        self.line(ui, pos2(from.x, bus_y), pos2(top.x, bus_y), hl);
+                        self.line(ui, pos2(top.x, bus_y), top, hl);
                     }
                 }
             }
@@ -634,6 +704,16 @@ struct AncestorTree {
     nodes: Vec<TidyNode>,
     slots: Vec<Slot>,
     generation: Vec<usize>,
+}
+
+impl AncestorTree {
+    /// Whether slots `a` and `b` hold two people `linked` says are joined.
+    fn joins(&self, a: usize, b: usize, linked: impl Fn(&str, &str) -> bool) -> bool {
+        match (&self.slots[a], &self.slots[b]) {
+            (Slot::Person(x), Slot::Person(y)) => linked(x, y),
+            _ => false,
+        }
+    }
 }
 
 enum Place {
