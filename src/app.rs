@@ -15,6 +15,8 @@ use crate::model::{self, CitationForm, CiteSource, Document, FactKey, PersonForm
 use crate::mediaview::MediaUi;
 use crate::platform::{self, ServerEvent};
 use crate::relation::RelationView;
+use crate::remote::{self, Busy, Remote};
+use crate::remoteview::{self, RemoteUi, Request};
 use crate::reports::ReportsView;
 use crate::tools::ToolsUi;
 use crate::tree::TreeView;
@@ -74,6 +76,16 @@ pub enum Action {
     SaveAs,
     /// Write the tree and its documents to a `.gdz` bundle.
     ExportBundle,
+    /// Sign in to a Genie server's shared tree.
+    Connect,
+    /// Exchange changes with the server.
+    Sync,
+    /// End this account's sign-ins everywhere and close the shared tree.
+    SignOut,
+    ChangePassword,
+    Accounts,
+    /// Put a tree on the server (an administrator, when it has none).
+    UploadTree,
     Close,
     Undo,
     Redo,
@@ -82,9 +94,37 @@ pub enum Action {
     ForgetRecent(PathBuf),
 }
 
+impl Action {
+    /// Whether this changes the tree, which read-only accounts can't.
+    fn edits(&self) -> bool {
+        matches!(
+            self,
+            Action::Edit(_)
+                | Action::AddCitation(_)
+                | Action::NewPerson
+                | Action::AddRelative(..)
+                | Action::Delete(_)
+                | Action::Unlink { .. }
+                | Action::EditMedia(_)
+                | Action::PickMedia(_)
+                | Action::AddMedia { .. }
+                | Action::SetPrimaryPhoto { .. }
+                | Action::LocateMedia(_)
+                | Action::ReplaceMediaFile(_)
+                | Action::FindMissingMedia
+                | Action::FindDuplicatePeople
+                | Action::FindDuplicateSources
+                | Action::WikiTreePhotos
+                | Action::Undo
+                | Action::Redo
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 enum Pending {
     Open(Option<PathBuf>),
+    Connect,
     New,
     Sample,
     Close,
@@ -156,6 +196,15 @@ pub struct GenieApp {
     server_load: Option<Result<(), String>>,
     /// The revision being saved to the server.
     saving: Option<u64>,
+    /// The shared tree on a Genie server this document is a working copy of.
+    remote: Option<Remote>,
+    remote_ui: RemoteUi,
+    remote_requests: Vec<Request>,
+    /// Filled in on the sign-in form next time.
+    last_server: String,
+    last_username: String,
+    /// What was open before signing in, offered for an empty server.
+    before_connect: Option<PathBuf>,
 }
 
 impl GenieApp {
@@ -194,6 +243,12 @@ impl GenieApp {
             server: platform::Server::default(),
             server_load: None,
             saving: None,
+            remote: None,
+            remote_ui: RemoteUi::default(),
+            remote_requests: Vec::new(),
+            last_server: String::new(),
+            last_username: String::new(),
+            before_connect: None,
         };
         if let Some(storage) = cc.storage {
             if let Some(t) = storage.get_string("theme")
@@ -215,6 +270,8 @@ impl GenieApp {
                 app.recent = r.lines().filter(|l| !l.is_empty()).map(PathBuf::from).collect();
             }
             last_open = storage.get_string("last_open").filter(|p| !p.is_empty()).map(PathBuf::from);
+            app.last_server = storage.get_string("last_server").unwrap_or_default();
+            app.last_username = storage.get_string("last_username").unwrap_or_default();
         }
         app.theme.theme().install(&cc.egui_ctx);
         crate::fonts::install(&cc.egui_ctx);
@@ -243,6 +300,13 @@ impl GenieApp {
         self.relation = RelationView::default();
         self.media_ui = MediaUi::default();
         self.tools = ToolsUi::default();
+        // Opening a server's working copy (from the recent list, or on
+        // start-up) reconnects to it; opening anything else leaves it.
+        self.remote = match (self.remote.take(), doc.path.as_deref()) {
+            (Some(r), Some(p)) if r.tree == p => Some(r),
+            (_, Some(p)) => Remote::open_for(p),
+            _ => None,
+        };
         self.doc = Some(doc);
         self.history.clear();
         self.history_pos = 0;
@@ -447,6 +511,13 @@ impl GenieApp {
     fn perform(&mut self, ctx: &egui::Context, pending: Pending) {
         match pending {
             Pending::Open(Some(p)) => self.load_path(ctx, &p),
+            Pending::Connect => {
+                let (server, user) = match &self.remote {
+                    Some(r) => (r.state.server.clone(), r.state.user.username.clone()),
+                    None => (self.last_server.clone(), self.last_username.clone()),
+                };
+                self.remote_ui.open_connect(&server, &user, None);
+            }
             Pending::Open(None) if platform::WEB => self.load_from_server(ctx),
             Pending::Open(None) => {
                 if let Some(p) = platform::pick_ged(self.recent.first().and_then(|p| p.parent())) {
@@ -507,6 +578,211 @@ impl GenieApp {
         Toast::new(format!("Added {n} document{}{to}", if n == 1 { "" } else { "s" })).tone(BadgeTone::Ok).show(ctx);
         if let [one] = created.as_slice() {
             self.media_ui.edit(doc, one);
+        }
+    }
+
+    // ---- the shared tree on a server -------------------------------------------------
+
+    /// Signed in with an account that can't change the tree.
+    fn read_only(&self) -> bool {
+        self.remote.as_ref().is_some_and(|r| !r.role().can_edit())
+    }
+
+    fn explain_read_only(&self, ctx: &egui::Context) {
+        if let Some(r) = &self.remote {
+            Toast::new("This account can view the tree but not change it")
+                .description(format!("{} accounts on {} are read-only. An administrator can change that.", r.role().label(), r.host()))
+                .show(ctx);
+        }
+    }
+
+    /// Saves the working copy, then exchanges changes with the server.
+    fn sync(&mut self, ctx: &egui::Context, resolve: HashMap<String, &'static str>) {
+        if self.remote.as_ref().is_none_or(|r| r.busy.is_some()) {
+            return;
+        }
+        if !self.read_only() && self.doc.as_ref().is_some_and(|d| d.dirty) && !self.save(ctx, false) {
+            return;
+        }
+        if let Some(r) = self.remote.as_mut() {
+            r.sync(ctx, resolve);
+        }
+    }
+
+    /// Opens the working copy from disk again, after a sync changed it,
+    /// staying on the same person and section.
+    fn reload_working_copy(&mut self) {
+        let Some(tree) = self.remote.as_ref().map(|r| r.tree.clone()) else { return };
+        let Ok(bytes) = std::fs::read(&tree) else { return };
+        let (mut doc, notes) = Document::from_bytes(&bytes);
+        doc.path = Some(tree);
+        if self.doc.is_none() {
+            self.set_doc(doc);
+        } else {
+            self.doc = Some(doc);
+            self.editor = None;
+            self.fix_selection();
+        }
+        self.load_notes = notes;
+    }
+
+    fn connected(&mut self, ctx: &egui::Context, remote: Remote) {
+        self.last_server = remote.state.server.clone();
+        self.last_username = remote.state.user.username.clone();
+        self.before_connect = self.doc.as_ref().and_then(|d| d.path.clone()).filter(|p| *p != remote.tree);
+        Toast::new(format!("Signed in to {}", remote.host()))
+            .tone(BadgeTone::Ok)
+            .description(format!("As {} · {}", remote.state.user.shown_name(), remote.role().label()))
+            .show(ctx);
+        let tree = remote.tree.clone();
+        self.remote = Some(remote);
+        if tree.is_file() {
+            self.load_path(ctx, &tree);
+        } else {
+            let mut doc = Document::new_empty();
+            doc.path = Some(tree);
+            self.set_doc(doc);
+            self.load_notes.clear();
+        }
+        self.tab = TAB_PROFILE;
+        if let Some(r) = self.remote.as_mut() {
+            r.sync(ctx, HashMap::new());
+        }
+    }
+
+    /// Ends this account's sign-ins everywhere, and closes the shared tree.
+    fn sign_out(&mut self, ctx: &egui::Context) {
+        let Some(mut r) = self.remote.take() else { return };
+        let client = r.client();
+        std::thread::spawn(move || {
+            let _ = client.sign_out_everywhere();
+        });
+        r.state.token.clear();
+        let _ = r.save_state();
+        Toast::new(format!("Signed out of {}", r.host())).description("Your copy stays on this computer; sign in again to sync it.").show(ctx);
+        self.doc = None;
+        self.selected = None;
+        self.editor = None;
+    }
+
+    /// Puts a tree on the server: a `.gdz` as it is, a `.ged` bundled with
+    /// the documents it links to.
+    fn seed(&mut self, ctx: &egui::Context, path: PathBuf, replace: bool) {
+        let Some(r) = self.remote.as_mut() else { return };
+        r.request(ctx, move |c| {
+            let bundle = if is_bundle(&path) {
+                path.clone()
+            } else {
+                let Ok(bytes) = std::fs::read(&path) else { return remote::Event::Failed(format!("Couldn't read {}", path.display())) };
+                let (mut doc, _) = Document::from_bytes(&bytes);
+                doc.path = Some(path.clone());
+                let out = std::env::temp_dir().join(format!("genie-upload-{}.gdz", std::process::id()));
+                if let Err(e) = crate::bundle::export(&doc, &out) {
+                    return remote::Event::Failed(e.to_string());
+                }
+                out
+            };
+            let result = c.import(&bundle, replace);
+            if !is_bundle(&path) {
+                let _ = std::fs::remove_file(&bundle);
+            }
+            match result {
+                Ok(()) => remote::Event::Imported,
+                Err(e) => remote::Event::Failed(e),
+            }
+        });
+    }
+
+    /// What finished in the background.
+    fn remote_events(&mut self, ctx: &egui::Context) {
+        let Some(r) = self.remote.as_mut() else { return };
+        let host = r.host();
+        while let Some(event) = r.poll() {
+            match event {
+                remote::Event::TreeSynced { base_revision, reload, merged, sent, renamed } => {
+                    r.state.base_revision = base_revision;
+                    let _ = r.save_state();
+                    r.forget_history();
+                    r.history.clear();
+                    let msg = match (sent, merged, reload) {
+                        (true, true, _) => "Synced, with others' changes merged in".to_string(),
+                        (true, false, _) => "Synced".to_string(),
+                        (false, _, true) => format!("Updated from {host}"),
+                        (false, _, false) => "Up to date".to_string(),
+                    };
+                    let mut toast = Toast::new(msg).tone(BadgeTone::Ok);
+                    if renamed > 0 {
+                        toast = toast.description(format!("{renamed} new record{} renumbered, as someone else had used the number", if renamed == 1 { "" } else { "s" }));
+                    }
+                    toast.show(ctx);
+                    let empty_server = base_revision.is_none() && r.role() == remote::Role::Admin;
+                    r.sync_media(ctx);
+                    if reload {
+                        self.reload_working_copy();
+                    }
+                    if empty_server {
+                        self.remote_ui.offer_seed(self.before_connect.clone(), false);
+                    }
+                    return self.remote_events(ctx);
+                }
+                remote::Event::Conflicts(list) => self.remote_ui.show_conflicts(list),
+                remote::Event::MediaSynced { media, downloaded, uploaded, missing } => {
+                    r.state.media = media;
+                    let _ = r.save_state();
+                    if downloaded + uploaded > 0 {
+                        ctx.forget_all_images();
+                        let mut parts = Vec::new();
+                        if downloaded > 0 {
+                            parts.push(format!("{downloaded} downloaded"));
+                        }
+                        if uploaded > 0 {
+                            parts.push(format!("{uploaded} uploaded"));
+                        }
+                        Toast::new(format!("Documents: {}", parts.join(", "))).tone(BadgeTone::Ok).show(ctx);
+                    }
+                    if missing > 0 {
+                        Toast::new(format!("{missing} document{} not on this computer or the server", if missing == 1 { "" } else { "s" }))
+                            .tone(BadgeTone::Warning)
+                            .show(ctx);
+                    }
+                }
+                remote::Event::News(rows) => r.news = rows,
+                remote::Event::History { xref, rows } => {
+                    r.history.insert(xref, rows);
+                }
+                remote::Event::Accounts(list) => self.remote_ui.set_accounts(list),
+                remote::Event::Done(msg) => {
+                    Toast::new(msg).tone(BadgeTone::Ok).show(ctx);
+                    if self.remote_ui.accounts_open() {
+                        remoteview::refresh_accounts(r, ctx);
+                    }
+                }
+                remote::Event::PasswordChanged { token, expires_at } => {
+                    r.state.token = token;
+                    r.state.expires_at = expires_at;
+                    let _ = r.save_state();
+                    Toast::new("Password changed").tone(BadgeTone::Ok).description("Other computers will need the new password.").show(ctx);
+                }
+                remote::Event::Imported => {
+                    Toast::new(format!("Tree uploaded to {host}")).tone(BadgeTone::Ok).show(ctx);
+                    r.sync(ctx, HashMap::new());
+                }
+                remote::Event::Failed(e) if e == remote::SIGNED_OUT => {
+                    let (server, user) = (r.state.server.clone(), r.state.user.username.clone());
+                    self.remote_ui.open_connect(&server, &user, Some(e));
+                }
+                remote::Event::Failed(e) => remoteview::failed(ctx, &host, &e),
+            }
+        }
+    }
+
+    fn remote_requests(&mut self, ctx: &egui::Context) {
+        for req in std::mem::take(&mut self.remote_requests) {
+            match req {
+                Request::Connected(r) => self.connected(ctx, r),
+                Request::Resolve(resolve) => self.sync(ctx, resolve),
+                Request::Seed { path, replace } => self.seed(ctx, path, replace),
+            }
         }
     }
 
@@ -795,6 +1071,10 @@ impl GenieApp {
 
     fn process_actions(&mut self, ctx: &egui::Context) {
         for action in std::mem::take(&mut self.actions) {
+            if action.edits() && self.read_only() {
+                self.explain_read_only(ctx);
+                continue;
+            }
             match action {
                 Action::Select(x) => self.select(x),
                 Action::Edit(x) => self.open_edit(x),
@@ -957,13 +1237,30 @@ impl GenieApp {
                 Action::New => self.request(ctx, Pending::New),
                 Action::Sample => self.request(ctx, Pending::Sample),
                 Action::Close => self.request(ctx, Pending::Close),
+                Action::Save if self.remote.is_some() => self.sync(ctx, HashMap::new()),
                 Action::Save => {
                     self.save(ctx, false);
+                }
+                Action::SaveAs if self.remote.is_some() => {
+                    Toast::new("This is the shared tree's working copy").description("To keep a copy of your own, use File → Export bundle.").show(ctx);
                 }
                 Action::SaveAs => {
                     self.save(ctx, true);
                 }
                 Action::ExportBundle => self.export_bundle(ctx),
+                Action::Connect => self.request(ctx, Pending::Connect),
+                Action::Sync => self.sync(ctx, HashMap::new()),
+                Action::SignOut => self.sign_out(ctx),
+                Action::ChangePassword => self.remote_ui.open_password(),
+                Action::Accounts => {
+                    if let Some(r) = self.remote.as_mut() {
+                        self.remote_ui.open_accounts(r, ctx);
+                    }
+                }
+                Action::UploadTree => {
+                    let replace = self.remote.as_ref().is_some_and(|r| r.state.base_revision.is_some());
+                    self.remote_ui.offer_seed(self.before_connect.clone(), replace);
+                }
                 Action::Undo => {
                     if self.doc.as_mut().is_some_and(|d| d.undo()) {
                         self.fix_selection();
@@ -989,9 +1286,10 @@ impl GenieApp {
     }
 
     fn update_title(&mut self, ctx: &egui::Context) {
-        let title = match &self.doc {
-            Some(d) => format!("{}{} — Genie", d.file_name(), if d.dirty { " •" } else { "" }),
-            None => "Genie".into(),
+        let title = match (&self.doc, &self.remote) {
+            (Some(d), Some(r)) => format!("{}{} — Genie", r.host(), if d.dirty { " •" } else { "" }),
+            (Some(d), None) => format!("{}{} — Genie", d.file_name(), if d.dirty { " •" } else { "" }),
+            (None, _) => "Genie".into(),
         };
         if title != self.title {
             platform::set_title(ctx, &title);
@@ -1009,14 +1307,19 @@ impl GenieApp {
         let mut bar = MenuBar::new("menubar").brand("Genie");
         if let Some(d) = &self.doc {
             let n = d.people().len();
-            let status = format!(
-                "{} · {n} {}{}",
-                d.file_name(),
-                if n == 1 { "person" } else { "people" },
-                if dirty { " · unsaved" } else { "" }
-            );
-            bar = bar.status_with_dot(status, if dirty { p.amber } else { p.green });
+            let people = format!("{n} {}", if n == 1 { "person" } else { "people" });
+            let (status, color) = match &self.remote {
+                Some(r) => {
+                    let unsynced = dirty || r.has_local_changes() && r.role().can_edit();
+                    let state = if r.busy.is_some() { "syncing…" } else if unsynced { "not synced" } else { "synced" };
+                    (format!("{} · {} ({}) · {people} · {state}", r.host(), r.state.user.shown_name(), r.role().label()), if unsynced { p.amber } else { p.green })
+                }
+                None => (format!("{} · {people}{}", d.file_name(), if dirty { " · unsaved" } else { "" }), if dirty { p.amber } else { p.green }),
+            };
+            bar = bar.status_with_dot(status, color);
         }
+        let connected = self.remote.as_ref().map(|r| (r.role(), r.busy.is_some()));
+        let read_only = self.read_only();
         let (tab, can_back, can_forward) = (self.tab, self.can_back(), self.can_forward());
         let home = self.live_home();
         let acts = &mut self.actions;
@@ -1058,10 +1361,32 @@ impl GenieApp {
                     acts.push(Action::Sample);
                 }
                 ui.separator();
-                if ui.add(MenuItem::new("Save").icon(glyphs::SAVE.to_string()).shortcut("Ctrl S").enabled(has_doc)).clicked() {
+                match connected {
+                    None => {
+                        if ui.add(MenuItem::new("Connect to a shared tree…").icon(glyphs::HOME.to_string())).on_hover_text("Sign in to a Genie server, such as genie.henshaw.us").clicked() {
+                            acts.push(Action::Connect);
+                        }
+                    }
+                    Some((_, busy)) => {
+                        if ui.add(MenuItem::new("Sync").icon(glyphs::SAVE.to_string()).shortcut("Ctrl S").enabled(!busy)).clicked() {
+                            acts.push(Action::Sync);
+                        }
+                        if ui.add(MenuItem::new("Change password…")).clicked() {
+                            acts.push(Action::ChangePassword);
+                        }
+                        if ui.add(MenuItem::new("Sign in again…")).clicked() {
+                            acts.push(Action::Connect);
+                        }
+                        if ui.add(MenuItem::new("Sign out")).on_hover_text("Ends your sign-in on every computer; your copy stays here").clicked() {
+                            acts.push(Action::SignOut);
+                        }
+                    }
+                }
+                ui.separator();
+                if connected.is_none() && ui.add(MenuItem::new("Save").icon(glyphs::SAVE.to_string()).shortcut("Ctrl S").enabled(has_doc)).clicked() {
                     acts.push(Action::Save);
                 }
-                if ui.add(MenuItem::new("Save as…").shortcut("Ctrl Shift S").enabled(has_doc)).clicked() {
+                if ui.add(MenuItem::new("Save as…").shortcut("Ctrl Shift S").enabled(has_doc && connected.is_none())).clicked() {
                     acts.push(Action::SaveAs);
                 }
                 let item = ui.add(MenuItem::new("Export bundle…").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc));
@@ -1074,17 +1399,17 @@ impl GenieApp {
                 }
             });
             bar.menu("Edit", |ui| {
-                if ui.add(MenuItem::new("Undo").shortcut("Ctrl Z").enabled(can_undo)).clicked() {
+                if ui.add(MenuItem::new("Undo").shortcut("Ctrl Z").enabled(can_undo && !read_only)).clicked() {
                     acts.push(Action::Undo);
                 }
-                if ui.add(MenuItem::new("Redo").shortcut("Ctrl Shift Z").enabled(can_redo)).clicked() {
+                if ui.add(MenuItem::new("Redo").shortcut("Ctrl Shift Z").enabled(can_redo && !read_only)).clicked() {
                     acts.push(Action::Redo);
                 }
                 ui.separator();
-                if ui.add(MenuItem::new("Add person…").icon(glyphs::PLUS.to_string()).shortcut("Ctrl P").enabled(has_doc)).clicked() {
+                if ui.add(MenuItem::new("Add person…").icon(glyphs::PLUS.to_string()).shortcut("Ctrl P").enabled(has_doc && !read_only)).clicked() {
                     acts.push(Action::NewPerson);
                 }
-                if let Some(x) = &selected {
+                if let Some(x) = selected.as_ref().filter(|_| !read_only) {
                     if ui.add(MenuItem::new("Edit person…").icon(glyphs::PENCIL.to_string()).shortcut("Ctrl E")).clicked() {
                         acts.push(Action::Edit(x.clone()));
                     }
@@ -1148,6 +1473,15 @@ impl GenieApp {
                 if platform::WEB {
                     return;
                 }
+                if let Some((remote::Role::Admin, _)) = connected {
+                    ui.separator();
+                    if ui.add(MenuItem::new("Accounts…").icon(glyphs::KEY.to_string())).on_hover_text("Who can see and edit the shared tree").clicked() {
+                        acts.push(Action::Accounts);
+                    }
+                    if ui.add(MenuItem::new("Upload a tree to the server…")).on_hover_text("Replace the shared tree with one from a file (kept in its history)").clicked() {
+                        acts.push(Action::UploadTree);
+                    }
+                }
                 ui.separator();
                 if ui.add(MenuItem::new("Get photos from WikiTree…").icon(glyphs::DOWNLOAD.to_string()).enabled(has_doc)).clicked() {
                     acts.push(Action::WikiTreePhotos);
@@ -1184,13 +1518,33 @@ impl GenieApp {
             ui.add(TabBar::new(&mut self.tab, TABS));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let dirty = self.doc.as_ref().is_some_and(|d| d.dirty);
-                if ui
-                    .add(Button::new(format!("{}  Save", glyphs::SAVE)).accent(Accent::Green).size(ButtonSize::Small).enabled(dirty))
-                    .clicked()
-                {
-                    self.actions.push(Action::Save);
+                match &self.remote {
+                    Some(r) => {
+                        let unsynced = dirty || r.has_local_changes() && r.role().can_edit();
+                        let b = Button::new(format!("{}  Sync", glyphs::SAVE)).size(ButtonSize::Small).enabled(r.busy.is_none());
+                        let b = if unsynced || !r.news.is_empty() { b.accent(Accent::Green) } else { b.outline() };
+                        let hint = if unsynced { format!("Send your changes to {} and get everyone else's (Ctrl S)", r.host()) } else { format!("Get the latest from {} (Ctrl S)", r.host()) };
+                        if ui.add(b).on_hover_text(hint).clicked() {
+                            self.actions.push(Action::Sync);
+                        }
+                        if !r.news.is_empty() {
+                            let mut who: Vec<&str> = r.news.iter().filter_map(|c| c.user.as_deref()).collect();
+                            who.dedup();
+                            let n = r.news.len();
+                            let text = format!("{n} new change{} by {}", if n == 1 { "" } else { "s" }, who.join(", "));
+                            ui.label(RichText::new(text).size(12.5).color(Theme::current(ui.ctx()).palette.amber));
+                        }
+                    }
+                    None => {
+                        if ui
+                            .add(Button::new(format!("{}  Save", glyphs::SAVE)).accent(Accent::Green).size(ButtonSize::Small).enabled(dirty))
+                            .clicked()
+                        {
+                            self.actions.push(Action::Save);
+                        }
+                    }
                 }
-                if ui.add(Button::new(format!("{}  Add person", glyphs::PLUS)).size(ButtonSize::Small)).clicked() {
+                if !self.read_only() && ui.add(Button::new(format!("{}  Add person", glyphs::PLUS)).size(ButtonSize::Small)).clicked() {
                     self.actions.push(Action::NewPerson);
                 }
             });
@@ -1637,6 +1991,21 @@ impl eframe::App for GenieApp {
             }
         }
         self.server_events(&ctx);
+        self.remote_events(&ctx);
+        if let Some(r) = self.remote.as_mut() {
+            r.maybe_poll(&ctx);
+            if let Some(x) = &self.selected {
+                r.want_history(&ctx, x);
+            }
+        }
+        // Views show who last changed the selected person, and hide editing
+        // for read-only accounts.
+        let history = self.remote.as_ref().zip(self.selected.as_ref()).and_then(|(r, x)| r.history.get(x).cloned());
+        let read_only = self.read_only();
+        ctx.data_mut(|d| {
+            d.insert_temp(egui::Id::new("genie_history"), history);
+            d.insert_temp(egui::Id::new("genie_read_only"), read_only);
+        });
         self.handle_shortcuts(&ctx);
 
         egui::Panel::top("menubar")
@@ -1700,8 +2069,23 @@ impl eframe::App for GenieApp {
             self.tools.overlays(&ctx, doc, dismissed, &mut self.actions);
         }
         self.modals(&ctx);
+        self.remote_ui.show(&ctx, self.remote.as_mut(), &mut self.remote_requests);
+        if let Some(r) = self.remote.as_ref().filter(|r| r.busy == Some(Busy::Tree)) {
+            remoteview::syncing_overlay(&ctx, &r.host());
+        }
         Toasts::new().render(&ctx);
         self.process_actions(&ctx);
+        self.remote_requests(&ctx);
+        // Anything that slipped past the read-only guards is put back.
+        if self.read_only() && self.doc.as_ref().is_some_and(|d| d.dirty) {
+            self.reload_working_copy();
+            self.explain_read_only(&ctx);
+            // If the copy couldn't be read back, don't ask again every frame;
+            // a read-only account's changes are never sent anyway.
+            if let Some(d) = self.doc.as_mut() {
+                d.dirty = false;
+            }
+        }
         self.update_title(&ctx);
     }
 
@@ -1716,6 +2100,8 @@ impl eframe::App for GenieApp {
         storage.set_string("recent", recent.join("\n"));
         let last_open = self.doc.as_ref().and_then(|d| d.path.as_ref());
         storage.set_string("last_open", last_open.map(|p| p.display().to_string()).unwrap_or_default());
+        storage.set_string("last_server", self.last_server.clone());
+        storage.set_string("last_username", self.last_username.clone());
     }
 }
 

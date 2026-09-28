@@ -352,7 +352,13 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                         }
                     });
                     home_relation_line(ui, doc, xref, actions);
+                    if let Some(last) = shared_history(ui.ctx()).and_then(|h| h.into_iter().next()) {
+                        let who = last.user.clone().unwrap_or_else(|| "someone".into());
+                        let verb = if last.action == "add" { "Added" } else { "Last changed" };
+                        ui.label(RichText::new(format!("{verb} by {who} · {}", last.day())).size(12.5).color(p.text_faint));
+                    }
                 });
+                let read_only = ui.ctx().data(|d| d.get_temp::<bool>(egui::Id::new("genie_read_only"))).unwrap_or(false);
                 ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                     let more = ui.add(Button::new("⋯").outline().size(ButtonSize::Small));
                     Menu::new("profile_more").show_below(&more, |ui| {
@@ -373,10 +379,13 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                         } else if ui.add(MenuItem::new("Set as home person").icon(glyphs::HOME.to_string())).clicked() {
                             actions.push(Action::SetHome(Some(xref.to_string())));
                         }
-                        if ui.add(MenuItem::new("Delete person…").icon(glyphs::TRASH.to_string()).danger()).clicked() {
+                        if !read_only && ui.add(MenuItem::new("Delete person…").icon(glyphs::TRASH.to_string()).danger()).clicked() {
                             actions.push(Action::Delete(xref.to_string()));
                         }
                     });
+                    if read_only {
+                        return;
+                    }
                     let add = ui.add(Button::new(format!("{}  Add relative", glyphs::PLUS)).size(ButtonSize::Small));
                     Menu::new("profile_add").show_below(&add, |ui| add_relative_items(ui, doc, xref, actions));
                     if ui.add(Button::new(format!("{}  Edit", glyphs::PENCIL)).outline().size(ButtonSize::Small)).clicked() {
@@ -400,6 +409,7 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
             }
             sources_card(ui, doc, xref, actions);
             crate::mediaview::profile_card(ui, doc, xref, actions);
+            history_card(ui);
         };
         if wide {
             ui.columns(2, |cols| {
@@ -411,6 +421,37 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
             crate::minimap::family_map(ui, doc, xref, actions);
             left(ui, actions);
             family_card(ui, doc, xref, actions);
+        }
+    });
+}
+
+/// Who changed the selected person on the shared tree, newest first, when
+/// the app has fetched it.
+fn shared_history(ctx: &egui::Context) -> Option<Vec<crate::remote::ChangeRow>> {
+    ctx.data(|d| d.get_temp::<Option<Vec<crate::remote::ChangeRow>>>(egui::Id::new("genie_history"))).flatten().filter(|h| !h.is_empty())
+}
+
+fn history_card(ui: &mut Ui) {
+    let Some(rows) = shared_history(ui.ctx()) else { return };
+    let p = Theme::current(ui.ctx()).palette;
+    Card::new().heading("History").show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        for r in rows.iter().take(25) {
+            let what = match r.action.as_str() {
+                "add" => "Added",
+                "delete" => "Deleted",
+                _ => "Changed",
+            };
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(r.day()).size(12.5).color(p.text_faint));
+                ui.label(RichText::new(format!("{what} by {}", r.user.as_deref().unwrap_or("someone"))).size(13.0).color(p.text));
+                if !r.label.is_empty() && r.action != "modify" {
+                    ui.label(RichText::new(format!("({})", r.label)).size(12.5).color(p.text_muted));
+                }
+            });
+        }
+        if rows.len() > 25 {
+            ui.label(RichText::new(format!("and {} earlier changes", rows.len() - 25)).size(12.0).color(p.text_faint));
         }
     });
 }

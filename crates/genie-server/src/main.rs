@@ -3,7 +3,8 @@
 //! ```text
 //! genie-server                               serve (the default)
 //! genie-server migrate                       apply the schema and exit
-//! genie-server create-admin <username>       add an administrator (asks for a password)
+//! genie-server create-admin <username>       add an administrator (asks for a password,
+//!                                            or takes GENIE_NEW_PASSWORD)
 //! genie-server reset-password <username>     set a new password (asks for it)
 //! ```
 //!
@@ -33,6 +34,10 @@ fn fail(msg: impl std::fmt::Display) -> ! {
 }
 
 fn ask_password(prompt: &str) -> String {
+    // For scripted setups (and tests); otherwise it's asked for.
+    if let Some(p) = env("GENIE_NEW_PASSWORD") {
+        return p;
+    }
     let p = rpassword::prompt_password(prompt).unwrap_or_else(|e| fail(format!("couldn't read a password: {e}")));
     if p.chars().count() < auth::MIN_PASSWORD {
         fail(format!("passwords need at least {} characters", auth::MIN_PASSWORD));

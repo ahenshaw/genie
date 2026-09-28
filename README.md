@@ -45,6 +45,29 @@ cargo build --release        # embeds dist/ into Genie
 
 This opens `http://localhost:8080/` (use `--port N` to change it, `--no-browser` not to open one). Saving in the browser writes back to that `.ged` file, and photos and documents are fetched from the server. The server only listens on this computer (localhost) and has no login. The browser can't reach files on disk, so adding or relinking media files, *Find media files…* and *Get photos from WikiTree…* stay in the desktop app. Stop the server with Ctrl+C.
 
+## Share a tree with your family
+
+Genie can work on a family tree kept on a Genie server, such as genie.henshaw.us, so
+several people can build it together:
+
+- **Sign in:** *File → Connect to a shared tree…*, with the username and password an
+  administrator gave you. Genie keeps a copy of the tree and its documents on your
+  computer, so you can carry on without a connection.
+- **Sync:** press **Sync** (Ctrl+S) to send your changes and get everyone else's.
+  Changes to different people merge by themselves. If someone else changed the same
+  person, Genie shows who, and you choose whose version to keep. The toolbar says when
+  others have made changes you don't have yet.
+- **History:** each profile shows who last changed that person, and a *History* list of
+  every change.
+- **Accounts:** administrators set them up under *Tools → Accounts…*.
+  - **Editors** can change the tree.
+  - **Family** can see everyone but not change anything.
+  - **Guests** see only people who have died; living people appear as "Private".
+- **Starting the shared tree:** an administrator uploads it from *Tools → Upload a tree
+  to the server…*, which takes a `.gdz` bundle (with documents) or a `.ged` file.
+
+The server itself is described in [crates/genie-server](crates/genie-server/README.md).
+
 ## Getting started
 
 - **Open a file:** File → Open… (Ctrl+O), or drag a `.ged` file onto the window.

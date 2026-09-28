@@ -8,6 +8,8 @@ mod mediaview;
 mod minimap;
 mod platform;
 mod relation;
+mod remote;
+mod remoteview;
 mod reports;
 #[cfg(not(target_arch = "wasm32"))]
 mod server;
