@@ -1386,6 +1386,7 @@ dependencies = [
  "egui-elegance",
  "egui_extras",
  "ehttp",
+ "genie-core",
  "image",
  "mime_guess",
  "nodez",
@@ -1394,14 +1395,21 @@ dependencies = [
  "rfd",
  "rust-embed",
  "serde_json",
- "strsim",
- "time",
  "tokio",
  "ureq",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
  "web-time",
+]
+
+[[package]]
+name = "genie-core"
+version = "0.1.0"
+dependencies = [
+ "pathdiff",
+ "strsim",
+ "time",
  "zip",
 ]
 

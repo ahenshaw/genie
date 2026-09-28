@@ -371,7 +371,9 @@ impl Document {
         self.index.get(xref).map(|&i| &self.records[i])
     }
 
-    pub(crate) fn record_mut(&mut self, xref: &str) -> Option<&mut Node> {
+    /// A record to edit in place. Use it inside [`Document::mutate`], which
+    /// refreshes the caches afterwards.
+    pub fn record_mut(&mut self, xref: &str) -> Option<&mut Node> {
         let i = *self.index.get(xref)?;
         Some(&mut self.records[i])
     }

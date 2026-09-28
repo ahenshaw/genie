@@ -1,17 +1,11 @@
 #![windows_subsystem = "windows"]
 
 mod app;
-mod bundle;
-mod dedup;
 mod fonts;
-mod gedcom;
 mod graph;
 mod homepath;
-mod kinship;
-mod media;
 mod mediaview;
 mod minimap;
-mod model;
 mod platform;
 mod relation;
 mod reports;
@@ -23,6 +17,10 @@ mod tree;
 mod views;
 mod widgets;
 mod wikitree;
+
+// The tree model lives in genie-core, shared with the server; these keep the
+// app's `crate::model::…` paths working.
+use genie_core::{bundle, dedup, gedcom, kinship, media, model};
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {

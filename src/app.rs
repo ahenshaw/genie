@@ -21,7 +21,7 @@ use crate::tree::TreeView;
 use crate::views;
 use crate::widgets::{self, section_label};
 
-const SAMPLE: &[u8] = include_bytes!("sample.ged");
+const SAMPLE: &[u8] = genie_core::SAMPLE_GED;
 const MAX_RECENT: usize = 10;
 pub const TABS: [&str; 8] = ["Profile", "Tree", "Relationship", "Graph", "Media", "Reports", "Overview", "GEDCOM"];
 pub const TAB_PROFILE: usize = 0;

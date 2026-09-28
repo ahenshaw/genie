@@ -3,7 +3,13 @@ name = "genie"
 version = "0.2.1"
 edition = "2024"
 
+# The app is the root package; the tree model it shares with the server is a
+# library of its own.
+[workspace]
+members = ["crates/genie-core"]
+
 [dependencies]
+genie-core = { path = "crates/genie-core" }
 eframe = { version = "0.36", features = ["persistence"] }
 egui = "0.36"
 egui-elegance = "0.16"
@@ -11,13 +17,8 @@ nodez = "0.6"
 egui_extras = { version = "0.36", features = ["file", "image"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
 pathdiff = "0.2"
-strsim = "0.11"
 serde_json = "1"
 web-time = "1"
-# .gdz bundles (GEDZIP); pure-Rust deflate so the browser build compiles too.
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
-# Documents keep their modified times in bundles.
-time = { version = "0.3", default-features = false, features = ["std"] }
 
 # The desktop app, and the server that shows it in a browser (`genie --serve`).
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]

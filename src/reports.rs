@@ -908,7 +908,7 @@ mod tests {
     use super::*;
 
     fn sample() -> Document {
-        Document::from_bytes(include_bytes!("sample.ged")).0
+        Document::from_bytes(genie_core::SAMPLE_GED).0
     }
 
     fn find(doc: &Document, given: &str) -> String {

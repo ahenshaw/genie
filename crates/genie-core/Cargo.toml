@@ -1,0 +1,13 @@
+[package]
+name = "genie-core"
+version = "0.1.0"
+edition = "2024"
+description = "Genie's family tree model: GEDCOM, people and families, media, bundles, sync and privacy. No UI."
+
+[dependencies]
+pathdiff = "0.2"
+strsim = "0.11"
+# .gdz bundles (GEDZIP); pure-Rust deflate so the browser build compiles too.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
+# Documents keep their modified times in bundles.
+time = { version = "0.3", default-features = false, features = ["std"] }

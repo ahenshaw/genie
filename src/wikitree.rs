@@ -520,7 +520,7 @@ mod tests {
         let tree = dir.join("T.ged");
         std::fs::write(&tree, "0 HEAD\n0 TRLR\n").unwrap();
         std::fs::write(dir.join("dl/wikitree-X-1.jpg"), b"img").unwrap();
-        let (mut doc, _) = Document::from_bytes(include_bytes!("sample.ged"));
+        let (mut doc, _) = Document::from_bytes(genie_core::SAMPLE_GED);
         let photo = FoundPhoto {
             xref: "I1".into(),
             profile: "Hartwell-1".into(),

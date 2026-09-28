@@ -107,5 +107,5 @@ The workflow tests and builds Genie (including the browser app), then creates a 
 ## Tests
 
 ```sh
-cargo test
+cargo test --workspace
 ```
