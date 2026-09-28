@@ -37,7 +37,7 @@ jobs:
       - name: Read version
         shell: pwsh
         run: |
-          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          $version = ((cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages | Where-Object { $_.name -eq "genie" }).version
           if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
             Write-Error "Tag $env:GITHUB_REF_NAME doesn't match Cargo.toml version $version"
             exit 1
