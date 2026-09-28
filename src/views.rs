@@ -129,7 +129,8 @@ pub fn people_panel(
 
     // Reveal the selection when it changes from outside the list.
     let last_id = egui::Id::new("people_last_sel");
-    let last: Option<String> = ui.data(|d| d.get_temp(last_id));
+    // Stored as `Option<String>`: temp data is looked up by type, so read it back as that.
+    let last: Option<String> = ui.data(|d| d.get_temp::<Option<String>>(last_id)).flatten();
     let target = nav_to.or_else(|| (last.as_deref() != selected).then_some(sel_pos).flatten());
     ui.data_mut(|d| d.insert_temp(last_id, selected.map(str::to_string)));
 
