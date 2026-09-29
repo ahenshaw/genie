@@ -45,8 +45,11 @@ if ! MYSQL_PWD="$db_pass" mysqldump --single-transaction --no-tablespaces --trig
   rm -f "$tmp"
   fail "mysqldump of $db_name failed"
 fi
-# A dump without the tree's table in it is no backup.
-if ! gunzip -c "$tmp" | grep -q 'CREATE TABLE `revisions`'; then
+# A dump without the tree's table in it is no backup. (grep -c, not -q: -q
+# stops reading at the first match, gunzip dies of SIGPIPE, and pipefail
+# would call that a failure.)
+tables=$(gunzip -c "$tmp" | grep -c 'CREATE TABLE `revisions`' || true)
+if [[ ${tables:-0} -eq 0 ]]; then
   rm -f "$tmp"
   fail "the dump of $db_name looks empty"
 fi
