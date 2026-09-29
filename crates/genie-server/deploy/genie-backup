@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+#
+# Nightly backup of the shared tree, run from /etc/cron.d/genie-backup:
+#
+#   /var/backups/genie/genie-YYYY-MM-DD.sql.gz   the database: every revision,
+#                                                who changed what, accounts
+#   /var/backups/genie/media/                    the documents, by SHA-256
+#
+# Dumps are kept for KEEP_DAYS. Documents never change once stored (they're
+# named by their content), so the copy only ever gains files, and one removed
+# from the tree can still be restored from here.
+#
+# Restore the database with:
+#   gunzip -c genie-YYYY-MM-DD.sql.gz | mysql -u root -p genie
+set -euo pipefail
+
+ENV_FILE=/opt/genie-server/.env
+DEST=/var/backups/genie
+MEDIA=/var/lib/genie/media
+KEEP_DAYS=30
+
+log() { logger -t genie-backup "$*"; echo "$*"; }
+fail() { logger -t genie-backup -p user.err "FAILED: $*"; echo "genie-backup: $*" >&2; exit 1; }
+
+[[ $EUID -eq 0 ]] || fail "run as root"
+[[ -r $ENV_FILE ]] || fail "can't read $ENV_FILE"
+
+# DATABASE_URL=mysql://USER:PASSWORD@HOST:PORT/DB (the password is hex, so no escaping).
+url=$(grep -E '^DATABASE_URL=' "$ENV_FILE" | head -1 | cut -d= -f2-)
+[[ $url =~ ^mysql://([^:]+):([^@]*)@([^:/]+):?([0-9]*)/(.+)$ ]] || fail "can't read DATABASE_URL in $ENV_FILE"
+db_user=${BASH_REMATCH[1]}
+db_pass=${BASH_REMATCH[2]}
+db_host=${BASH_REMATCH[3]}
+db_port=${BASH_REMATCH[4]:-3306}
+db_name=${BASH_REMATCH[5]%%\?*}
+
+install -d -m 700 "$DEST" "$DEST/media"
+
+out="$DEST/genie-$(date -u +%F).sql.gz"
+tmp="$out.partial"
+# --single-transaction: a consistent snapshot without stopping the site.
+# --no-tablespaces: that needs a privilege the genie account doesn't have.
+if ! MYSQL_PWD="$db_pass" mysqldump --single-transaction --no-tablespaces --triggers \
+    -h "$db_host" -P "$db_port" -u "$db_user" "$db_name" | gzip -9 > "$tmp"; then
+  rm -f "$tmp"
+  fail "mysqldump of $db_name failed"
+fi
+# A dump without the tree's table in it is no backup.
+if ! gunzip -c "$tmp" | grep -q 'CREATE TABLE `revisions`'; then
+  rm -f "$tmp"
+  fail "the dump of $db_name looks empty"
+fi
+chmod 600 "$tmp"
+mv "$tmp" "$out"
+
+# Documents: add new ones; never delete (see above). Skip half-received uploads.
+if [[ -d $MEDIA ]]; then
+  rsync -a --exclude '.incoming-*' --exclude '.bundles/' "$MEDIA/" "$DEST/media/" || fail "copying documents failed"
+fi
+
+find "$DEST" -maxdepth 1 -name 'genie-*.sql.gz' -mtime +"$KEEP_DAYS" -delete
+
+files=$(find "$DEST/media" -type f | wc -l)
+log "backed up $db_name to $out ($(du -h "$out" | cut -f1)); $files documents in $DEST/media"

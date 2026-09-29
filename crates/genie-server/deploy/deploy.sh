@@ -31,7 +31,7 @@ echo "==> glibc: needs $need, $HOST has $have"
 
 echo "==> Staging to ${HOST}:~/${STAGE}/"
 ssh "$HOST" "mkdir -p ~/${STAGE}"
-rsync -az "$BIN" crates/genie-server/deploy/{install.sh,genie-admin,genie-server.service,genie.henshaw.us.conf} "${HOST}:${STAGE}/"
+rsync -az "$BIN" crates/genie-server/deploy/{install.sh,genie-admin,genie-server.service,genie.henshaw.us.conf,genie-backup,genie-backup.cron} "${HOST}:${STAGE}/"
 rsync -az --delete dist/ "${HOST}:${STAGE}/web/"
 
 cat <<EOF

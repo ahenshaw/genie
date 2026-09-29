@@ -112,14 +112,20 @@ ssh -t tennis.henshaw.us 'sudo genie-admin create-admin <username>'
 ssh -t tennis.henshaw.us 'sudo genie-admin reset-password <username>'
 ```
 
-**Backups.** Everything that matters is in the `genie` database and in
-`/var/lib/genie/media`. The database includes every revision and who made it. Back up
-both, e.g. nightly from root's crontab:
+**Backups.** `install.sh` sets up `/usr/local/sbin/genie-backup`, which runs nightly at
+03:17 from `/etc/cron.d/genie-backup`. It writes to `/var/backups/genie/` (root only):
 
-```sh
-mysqldump --single-transaction genie | gzip > /var/backups/genie-$(date +%F).sql.gz
-rsync -a /var/lib/genie/media/ /var/backups/genie-media/
-```
+- **The database**, as `genie-YYYY-MM-DD.sql.gz`: every revision, who changed what, and
+  the accounts. It's dumped as the `genie` account, with a consistent snapshot, so the
+  site keeps running. Dumps are kept for 30 days.
+- **The documents**, copied into `media/`. They're named by content and never change, so
+  the copy only gains files, and a document removed from the tree can still be recovered.
+
+Each run logs to syslog (`journalctl -t genie-backup`), and fails if the dump comes out
+empty. To run one now: `sudo genie-backup`. To restore the database:
+`gunzip -c genie-YYYY-MM-DD.sql.gz | mysql -u root -p genie`.
+
+These backups live on the same VPS, so copy them somewhere else as well.
 
 **Signing everyone out:** change `SESSION_SECRET` in `.env`
 (`openssl rand -hex 32`), then `systemctl restart genie-server`.

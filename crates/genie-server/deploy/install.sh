@@ -149,6 +149,16 @@ echo "==> https://$SITE/api/me answers $code (401 is right: not signed in)"
 code=$(curl -s -o /dev/null -w '%{http_code}' "https://$SITE/" || true)
 echo "==> https://$SITE/ answers $code (200: the browser app)"
 
+echo "==> Nightly backups"
+install -m 755 "$STAGE/genie-backup" /usr/local/sbin/genie-backup
+install -m 644 "$STAGE/genie-backup.cron" /etc/cron.d/genie-backup
+if ! ls /var/backups/genie/genie-*.sql.gz >/dev/null 2>&1; then
+  echo "    first backup now:"
+  /usr/local/sbin/genie-backup | sed 's/^/    /'
+else
+  echo "    last: $(ls -t /var/backups/genie/genie-*.sql.gz | head -1)"
+fi
+
 users=$(mysql_admin -N genie -e "SELECT COUNT(*) FROM users" 2>/dev/null || echo "?")
 if [[ "$users" == 0 ]]; then
   cat <<EOF

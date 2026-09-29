@@ -1,0 +1,5 @@
+# Nightly backup of genie.henshaw.us's tree and documents (see /usr/local/sbin/genie-backup).
+# Output goes to syslog: journalctl -t genie-backup
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+17 3 * * * root /usr/local/sbin/genie-backup >/dev/null
