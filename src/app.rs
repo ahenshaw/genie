@@ -266,6 +266,9 @@ impl GenieApp {
             if storage.get_string("graph_links").as_deref() == Some(LinkMode::Direct.label()) {
                 app.graph.set_mode(LinkMode::Direct);
             }
+            if let Some(r) = storage.get_string("graph_reach").and_then(|r| r.parse().ok()) {
+                app.graph.set_reach(r);
+            }
             if let Some(n) = storage.get_string("not_dupes") {
                 for (path, pair) in n.lines().filter_map(|l| l.split_once('\t')) {
                     app.not_dupes.entry(path.to_string()).or_default().insert(pair.to_string());
@@ -2289,6 +2292,7 @@ impl eframe::App for GenieApp {
         let homes: Vec<String> = self.homes.iter().map(|(p, x)| format!("{p}\t{x}")).collect();
         storage.set_string("homes", homes.join("\n"));
         storage.set_string("graph_links", self.graph.mode().label().to_string());
+        storage.set_string("graph_reach", self.graph.reach().to_string());
         let recent: Vec<String> = self.recent.iter().map(|p| p.display().to_string()).collect();
         storage.set_string("recent", recent.join("\n"));
         let last_open = self.doc.as_ref().and_then(|d| d.path.as_ref());

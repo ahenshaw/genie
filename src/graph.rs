@@ -31,9 +31,13 @@ use crate::widgets::mix;
 
 /// Above this many people the graph shows a neighbourhood of the selection.
 const FULL_GRAPH_LIMIT: usize = 250;
-const NEIGHBOURHOOD_STEPS: usize = 4;
-/// Upper bound on people and families drawn in a neighbourhood.
-const NEIGHBOURHOOD_MAX: usize = 70;
+/// How many people away from the selection a neighbourhood reaches: a
+/// parent, child or partner is one away, a grandparent two.
+pub const REACH_CHOICES: [usize; 4] = [2, 3, 4, 5];
+pub const DEFAULT_REACH: usize = 3;
+/// Upper bound on people and families drawn in a neighbourhood: as many as
+/// a whole tree the graph would draw.
+const NEIGHBOURHOOD_MAX: usize = FULL_GRAPH_LIMIT;
 const SEXES: [&str; 3] = ["Male", "Female", "Unknown"];
 
 /// How parents are wired to children on the canvas.
@@ -79,6 +83,10 @@ pub struct FamilyGraph {
     /// The people shown when the tree is too big to show whole.
     scope_root: Option<String>,
     limited: bool,
+    /// People away from the selection a neighbourhood reaches.
+    reach: usize,
+    /// The neighbourhood stopped at NEIGHBOURHOOD_MAX before its reach.
+    capped: bool,
     needs_fit: bool,
     styled_for: Option<Color32>,
     last_selected: Option<String>,
@@ -105,6 +113,8 @@ impl FamilyGraph {
             synced_rev: None,
             scope_root: None,
             limited: false,
+            reach: DEFAULT_REACH,
+            capped: false,
             needs_fit: true,
             styled_for: None,
             last_selected: None,
@@ -113,6 +123,20 @@ impl FamilyGraph {
 
     pub fn mode(&self) -> LinkMode {
         self.mode
+    }
+
+    pub fn reach(&self) -> usize {
+        self.reach
+    }
+
+    pub fn set_reach(&mut self, reach: usize) {
+        let reach = reach.clamp(REACH_CHOICES[0], REACH_CHOICES[REACH_CHOICES.len() - 1]);
+        if reach != self.reach {
+            self.reach = reach;
+            // Draw the new neighbourhood.
+            self.synced_rev = None;
+            self.needs_fit = true;
+        }
     }
 
     pub fn set_mode(&mut self, mode: LinkMode) {
@@ -152,6 +176,8 @@ impl FamilyGraph {
         s.node_selected_outline = p.focus;
         s.node_active_outline = mix(p.focus, Color32::WHITE, 0.3);
         s.node_corner_radius = 10.0;
+        // A wide reach in a big family is tall: let Fit zoom out far enough.
+        s.min_zoom = 0.05;
         s.header_text = p.text;
         s.body_text = p.text_muted;
         s.wire_highlight = p.focus;
@@ -165,7 +191,11 @@ impl FamilyGraph {
 
     // ---- building the graph from the document -----------------------------------
 
-    fn in_scope(&self, doc: &Document, selected: Option<&str>) -> Option<HashSet<String>> {
+    /// The people and families to draw, when the tree is too big to draw
+    /// whole: out from the selection, `reach` people away (two steps each,
+    /// person to family to person), nearest first, up to NEIGHBOURHOOD_MAX.
+    fn in_scope(&mut self, doc: &Document, selected: Option<&str>) -> Option<HashSet<String>> {
+        self.capped = false;
         if doc.people().len() <= FULL_GRAPH_LIMIT {
             return None;
         }
@@ -173,7 +203,7 @@ impl FamilyGraph {
         let mut seen = HashSet::from([root.clone()]);
         let mut queue = VecDeque::from([(root, 0usize)]);
         while let Some((x, d)) = queue.pop_front() {
-            if d >= NEIGHBOURHOOD_STEPS {
+            if d >= self.reach * 2 {
                 continue;
             }
             let next: Vec<String> = if doc.person(&x).is_some() {
@@ -183,6 +213,7 @@ impl FamilyGraph {
             };
             for n in next {
                 if seen.len() >= NEIGHBOURHOOD_MAX {
+                    self.capped = true;
                     break;
                 }
                 if seen.insert(n.clone()) {
@@ -630,7 +661,20 @@ impl FamilyGraph {
             }
             if self.limited {
                 let who = self.scope_root.as_deref().and_then(|x| doc.person(x)).map(|p| p.display.clone()).unwrap_or_default();
-                ui.add(Badge::new(format!("{} of {} people · near {who}", self.node_of.keys().filter(|x| doc.person(x).is_some()).count(), doc.people().len()), BadgeTone::Info).preserve_case());
+                let shown = self.node_of.keys().filter(|x| doc.person(x).is_some()).count();
+                let text = format!("{shown} of {} people · within {} of {who}{}", doc.people().len(), self.reach, if self.capped { " (nearest)" } else { "" });
+                let badge = ui.add(Badge::new(text, BadgeTone::Info).preserve_case());
+                if self.capped {
+                    badge.on_hover_text(format!("The tree is big here: only the nearest {NEIGHBOURHOOD_MAX} people and families are drawn."));
+                }
+                ui.label(RichText::new("Reach").size(12.0).color(p.text_muted));
+                let mut i = REACH_CHOICES.iter().position(|r| *r == self.reach).unwrap_or(1);
+                ui.add(SegmentedControl::new(&mut i, REACH_CHOICES.map(|r| r.to_string())).size(SegmentedSize::Small).id_salt("graph_reach"))
+                    .on_hover_text("How many people away from the selected person to show. Parents, children and partners are 1 away; 2 adds grandparents, grandchildren, siblings and in-laws; and so on.");
+                if REACH_CHOICES[i] != self.reach {
+                    self.set_reach(REACH_CHOICES[i]);
+                    ui.ctx().request_repaint();
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let hint = match self.mode {
