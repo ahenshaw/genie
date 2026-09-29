@@ -590,6 +590,22 @@ impl Document {
                         out.push(ev);
                     }
                 }
+                // A partnership recorded without its marriage still belongs
+                // on the timeline, undated, so it isn't missing and the gap
+                // is plain to see.
+                if let Some(n) = &spouse_name
+                    && frec.child("MARR").is_none()
+                {
+                    out.push(EventView {
+                        tag: "MARR".into(),
+                        label: "Marriage".into(),
+                        date: String::new(),
+                        place: String::new(),
+                        detail: format!("with {n} · date not recorded"),
+                        sort: None,
+                        related: None,
+                    });
+                }
             }
             for kid in self.children(&fam) {
                 let Some(p) = self.person(&kid) else { continue };
@@ -1455,6 +1471,20 @@ pub fn normalize_date(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marriage_without_details_still_shows_on_the_timeline() {
+        let text = "0 HEAD\n0 @I1@ INDI\n1 NAME Eugene /Henshaw/\n1 FAMS @F1@\n1 FAMS @F2@\n\
+0 @I2@ INDI\n1 NAME Ann /First/\n1 FAMS @F1@\n0 @I3@ INDI\n1 NAME Laura /Second/\n1 FAMS @F2@\n\
+0 @F1@ FAM\n1 HUSB @I1@\n1 WIFE @I2@\n1 MARR\n2 DATE 26 FEB 1889\n\
+0 @F2@ FAM\n1 HUSB @I1@\n1 WIFE @I3@\n0 TRLR\n";
+        let (doc, _) = Document::from_bytes(text.as_bytes());
+        let marriages: Vec<(String, String)> = doc.timeline("I1").into_iter().filter(|e| e.tag == "MARR").map(|e| (e.date, e.detail)).collect();
+        assert_eq!(
+            marriages,
+            [("26 Feb 1889".to_string(), "with Ann First".to_string()), (String::new(), "with Laura Second · date not recorded".to_string())]
+        );
+    }
 
     #[test]
     fn dates() {
