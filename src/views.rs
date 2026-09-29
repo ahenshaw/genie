@@ -310,13 +310,51 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
         ui.spacing_mut().item_spacing.y = 12.0;
         // Hero.
         Card::new().padding(20.0).show(ui, |ui| {
+            let compact = crate::widgets::compact(ui.ctx());
+            // Edit / Add relative / ⋯: beside the name, or under it on a phone.
+            let read_only = crate::widgets::read_only(ui.ctx());
+            let buttons = |ui: &mut Ui, actions: &mut Vec<Action>| {
+                let more = ui.add(Button::new("⋯").outline().size(ButtonSize::Small));
+                Menu::new("profile_more").show_below(&more, |ui| {
+                    if ui.add(MenuItem::new("Show in tree")).clicked() {
+                        actions.push(Action::SetTab(TAB_TREE));
+                    }
+                    if ui.add(MenuItem::new("Show in graph")).clicked() {
+                        actions.push(Action::SetTab(TAB_GRAPH));
+                    }
+                    if ui.add(MenuItem::new("Show relationships")).clicked() {
+                        actions.push(Action::SetTab(TAB_RELATION));
+                    }
+                    ui.separator();
+                    if app_people(ui.ctx()).1.as_deref() == Some(xref) {
+                        if ui.add(MenuItem::new("Clear home person").icon(glyphs::HOME.to_string())).clicked() {
+                            actions.push(Action::SetHome(None));
+                        }
+                    } else if ui.add(MenuItem::new("Set as home person").icon(glyphs::HOME.to_string())).clicked() {
+                        actions.push(Action::SetHome(Some(xref.to_string())));
+                    }
+                    if !read_only && ui.add(MenuItem::new("Delete person…").icon(glyphs::TRASH.to_string()).danger()).clicked() {
+                        actions.push(Action::Delete(xref.to_string()));
+                    }
+                });
+                if read_only {
+                    return;
+                }
+                let add = ui.add(Button::new(format!("{}  Add relative", glyphs::PLUS)).size(ButtonSize::Small));
+                Menu::new("profile_add").show_below(&add, |ui| add_relative_items(ui, doc, xref, actions));
+                if ui.add(Button::new(format!("{}  Edit", glyphs::PENCIL)).outline().size(ButtonSize::Small)).clicked() {
+                    actions.push(Action::Edit(xref.to_string()));
+                }
+            };
             ui.horizontal(|ui| {
                 let (rect, _) = ui.allocate_exact_size(vec2(64.0, 64.0), Sense::hover());
                 paint_avatar(ui, rect.center(), 32.0, person);
                 ui.add_space(12.0);
                 ui.vertical(|ui| {
                     // Leave room for the Edit / Add relative / ⋯ buttons on the right.
-                    ui.set_max_width((ui.available_width() - 300.0).max(180.0));
+                    if !compact {
+                        ui.set_max_width((ui.available_width() - 300.0).max(180.0));
+                    }
                     ui.spacing_mut().item_spacing.y = 4.0;
                     ui.add(egui::Label::new(RichText::new(&person.display).size(26.0).family(crate::fonts::semibold()).color(p.text)).wrap());
                     let mut line = person.lifespan();
@@ -358,41 +396,14 @@ pub fn profile(ui: &mut Ui, doc: &Document, selected: Option<&str>, actions: &mu
                         ui.label(RichText::new(format!("{verb} by {who} · {}", last.day())).size(12.5).color(p.text_faint));
                     }
                 });
-                let read_only = crate::widgets::read_only(ui.ctx());
-                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
-                    let more = ui.add(Button::new("⋯").outline().size(ButtonSize::Small));
-                    Menu::new("profile_more").show_below(&more, |ui| {
-                        if ui.add(MenuItem::new("Show in tree")).clicked() {
-                            actions.push(Action::SetTab(TAB_TREE));
-                        }
-                        if ui.add(MenuItem::new("Show in graph")).clicked() {
-                            actions.push(Action::SetTab(TAB_GRAPH));
-                        }
-                        if ui.add(MenuItem::new("Show relationships")).clicked() {
-                            actions.push(Action::SetTab(TAB_RELATION));
-                        }
-                        ui.separator();
-                        if app_people(ui.ctx()).1.as_deref() == Some(xref) {
-                            if ui.add(MenuItem::new("Clear home person").icon(glyphs::HOME.to_string())).clicked() {
-                                actions.push(Action::SetHome(None));
-                            }
-                        } else if ui.add(MenuItem::new("Set as home person").icon(glyphs::HOME.to_string())).clicked() {
-                            actions.push(Action::SetHome(Some(xref.to_string())));
-                        }
-                        if !read_only && ui.add(MenuItem::new("Delete person…").icon(glyphs::TRASH.to_string()).danger()).clicked() {
-                            actions.push(Action::Delete(xref.to_string()));
-                        }
-                    });
-                    if read_only {
-                        return;
-                    }
-                    let add = ui.add(Button::new(format!("{}  Add relative", glyphs::PLUS)).size(ButtonSize::Small));
-                    Menu::new("profile_add").show_below(&add, |ui| add_relative_items(ui, doc, xref, actions));
-                    if ui.add(Button::new(format!("{}  Edit", glyphs::PENCIL)).outline().size(ButtonSize::Small)).clicked() {
-                        actions.push(Action::Edit(xref.to_string()));
-                    }
-                });
+                if !compact {
+                    ui.with_layout(Layout::right_to_left(Align::Min), |ui| buttons(ui, actions));
+                }
             });
+            if compact {
+                ui.add_space(8.0);
+                ui.with_layout(Layout::right_to_left(Align::Min), |ui| buttons(ui, actions));
+            }
         });
 
         let wide = ui.available_width() > 860.0;

@@ -405,7 +405,7 @@ impl MediaUi {
         Modal::new("media_viewer", &mut v.open)
             .heading(item.display_title())
             .subtitle(subtitle)
-            .max_width((screen.width() - 80.0).clamp(600.0, 1400.0))
+            .max_width(crate::widgets::fit_width(ctx, (screen.width() - 80.0).clamp(600.0, 1400.0)))
             .show(ctx, |ui| {
                 let height = (screen.height() - 220.0).clamp(300.0, 900.0);
                 ui.horizontal_top(|ui| {
@@ -554,7 +554,7 @@ impl MediaUi {
         let mut replace = false;
         Drawer::new("media_editor", &mut ed.open)
             .side(DrawerSide::Right)
-            .width(460.0)
+            .width(crate::widgets::fit_width(ctx, 460.0))
             .title("Edit document")
             .subtitle(media::file_name(&ed.item.file))
             .show(ctx, |ui| {

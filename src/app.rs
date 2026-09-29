@@ -207,6 +207,8 @@ pub struct GenieApp {
     last_username: String,
     /// What was open before signing in, offered for an empty server.
     before_connect: Option<PathBuf>,
+    /// On a phone-sized screen: the people list is showing, in place of the section.
+    show_people: bool,
     /// The browser, starting up: asking the server who's signed in.
     web_probe: Option<std::sync::mpsc::Receiver<Result<Option<remote::User>, ()>>>,
 }
@@ -254,6 +256,7 @@ impl GenieApp {
             last_username: String::new(),
             before_connect: None,
             web_probe: None,
+            show_people: false,
         };
         if let Some(storage) = cc.storage {
             if let Some(t) = storage.get_string("theme")
@@ -1168,7 +1171,10 @@ impl GenieApp {
                 continue;
             }
             match action {
-                Action::Select(x) => self.select(x),
+                Action::Select(x) => {
+                    self.select(x);
+                    self.show_people = false;
+                }
                 Action::Edit(x) => self.open_edit(x),
                 Action::AddCitation(x) => {
                     self.open_edit(x);
@@ -1413,7 +1419,9 @@ impl GenieApp {
                 }
                 None => (format!("{} · {people}{}", d.file_name(), if dirty { " · unsaved" } else { "" }), if dirty { p.amber } else { p.green }),
             };
-            bar = bar.status_with_dot(status, color);
+            if !widgets::compact(ui.ctx()) {
+                bar = bar.status_with_dot(status, color);
+            }
         }
         let connected = self.remote.as_ref().map(|r| (r.role(), r.busy.is_some()));
         let read_only = self.read_only();
@@ -1620,6 +1628,10 @@ impl GenieApp {
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
+        if widgets::compact(ui.ctx()) {
+            self.compact_toolbar(ui);
+            return;
+        }
         ui.horizontal(|ui| {
             let (back, fwd) = widgets::history_buttons(ui, self.can_back(), self.can_forward());
             if back.on_hover_text(self.history_hint(-1)).clicked() {
@@ -1659,6 +1671,45 @@ impl GenieApp {
                     }
                 }
                 if !self.read_only() && ui.add(Button::new(format!("{}  Add person", glyphs::PLUS)).size(ButtonSize::Small)).clicked() {
+                    self.actions.push(Action::NewPerson);
+                }
+            });
+        });
+    }
+
+    /// The toolbar on a phone: the people list, the section as a menu, and
+    /// icon buttons, so it all fits in one row.
+    fn compact_toolbar(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            let people = if self.show_people { format!("{}  Back", glyphs::ARROW_LEFT) } else { format!("{}  People", glyphs::SEARCH) };
+            if ui.add(Button::new(people).outline().size(ButtonSize::Small)).clicked() {
+                self.show_people = !self.show_people;
+            }
+            if !self.show_people {
+                let options: Vec<(usize, &str)> = TABS.iter().copied().enumerate().collect();
+                ui.add(elegance::Select::new("compact_tab", &mut self.tab).options(options).width(130.0));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                let dirty = self.doc.as_ref().is_some_and(|d| d.dirty);
+                match &self.remote {
+                    Some(r) => {
+                        let unsynced = dirty || r.has_local_changes() && r.role().can_edit();
+                        let b = Button::new(glyphs::SAVE.to_string()).size(ButtonSize::Small).enabled(r.busy.is_none());
+                        let b = if unsynced || !r.news.is_empty() { b.accent(Accent::Green) } else { b.outline() };
+                        let hint = if r.news.is_empty() { "Sync".to_string() } else { format!("Sync: {} new changes", r.news.len()) };
+                        if ui.add(b).on_hover_text(hint).clicked() {
+                            self.actions.push(Action::Sync);
+                        }
+                    }
+                    None => {
+                        if ui.add(Button::new(glyphs::SAVE.to_string()).accent(Accent::Green).size(ButtonSize::Small).enabled(dirty)).on_hover_text("Save").clicked() {
+                            self.actions.push(Action::Save);
+                        }
+                    }
+                }
+                if !self.read_only() && ui.add(Button::new(glyphs::PLUS.to_string()).size(ButtonSize::Small)).on_hover_text("Add person").clicked() {
                     self.actions.push(Action::NewPerson);
                 }
             });
@@ -1760,7 +1811,7 @@ impl GenieApp {
                 .header_icon(glyphs::TRASH.to_string())
                 .header_accent(Accent::Red)
                 .alert(true)
-                .max_width(420.0)
+                .max_width(crate::widgets::fit_width(ctx, 420.0))
                 .show(ctx, |ui| {
                     widgets::muted(ui, "This removes the person and their links to parents, partners and children. You can undo it with Ctrl+Z.");
                     ui.add_space(12.0);
@@ -1794,7 +1845,7 @@ impl GenieApp {
                 .subtitle(format!("{name} has unsaved changes."))
                 .header_icon(glyphs::TRIANGLE_ALERT.to_string())
                 .header_accent(Accent::Amber)
-                .max_width(440.0)
+                .max_width(crate::widgets::fit_width(ctx, 440.0))
                 .show(ctx, |ui| {
                     widgets::muted(ui, "If you don't save, your changes will be lost.");
                     ui.add_space(12.0);
@@ -1828,13 +1879,13 @@ impl GenieApp {
             }
         }
 
-        Modal::new("about", &mut self.about_open).heading("Genie").subtitle("Genealogy for GEDCOM files").max_width(420.0).show(ctx, |ui| {
+        Modal::new("about", &mut self.about_open).heading("Genie").subtitle("Genealogy for GEDCOM files").max_width(crate::widgets::fit_width(ctx, 420.0)).show(ctx, |ui| {
             widgets::muted(ui, "Load, build, explore and save family trees as GEDCOM 5.5.1. Unknown tags are preserved when you save.");
             ui.add_space(6.0);
             widgets::muted(ui, "Built with egui, egui-elegance and nodez.");
         });
 
-        Modal::new("shortcuts", &mut self.shortcuts_open).heading("Keyboard shortcuts").max_width(460.0).show(ctx, |ui| {
+        Modal::new("shortcuts", &mut self.shortcuts_open).heading("Keyboard shortcuts").max_width(crate::widgets::fit_width(ctx, 460.0)).show(ctx, |ui| {
             let p = Theme::current(ui.ctx()).palette;
             egui::Grid::new("keys").num_columns(2).spacing([24.0, 8.0]).show(ui, |ui| {
                 for (k, v) in [
@@ -1883,7 +1934,7 @@ impl GenieApp {
         let mut cancel = false;
         Drawer::new("person_editor", &mut ed.open)
             .side(DrawerSide::Right)
-            .width(440.0)
+            .width(crate::widgets::fit_width(ctx, 440.0))
             .title(title)
             .subtitle(subtitle)
             .show(ctx, |ui| {
@@ -2156,16 +2207,29 @@ impl eframe::App for GenieApp {
                 d.insert_temp(egui::Id::new("genie_home"), home.clone());
                 d.insert_temp(egui::Id::new("genie_tree_path"), tree);
             });
-            egui::Panel::left("people")
-                .resizable(true)
-                .default_size(300.0)
-                .size_range(230.0..=480.0)
-                .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 12, right: 8, top: 12, bottom: 8 }))
-                .show(ui, |ui| {
-                    views::people_panel(ui, &doc, &mut self.search, &mut self.sex_filter, &mut self.focus_search, self.selected.as_deref(), &mut self.actions);
-                });
+            let compact = widgets::compact(&ctx);
+            if compact && (self.show_people || self.focus_search) {
+                // A phone: the people list takes the whole screen.
+                self.show_people = true;
+                egui::CentralPanel::default()
+                    .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 10, right: 10, top: 10, bottom: 8 }))
+                    .show(ui, |ui| {
+                        views::people_panel(ui, &doc, &mut self.search, &mut self.sex_filter, &mut self.focus_search, self.selected.as_deref(), &mut self.actions);
+                    });
+            } else if !compact {
+                egui::Panel::left("people")
+                    .resizable(true)
+                    .default_size(300.0)
+                    .size_range(230.0..=480.0)
+                    .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 12, right: 8, top: 12, bottom: 8 }))
+                    .show(ui, |ui| {
+                        views::people_panel(ui, &doc, &mut self.search, &mut self.sex_filter, &mut self.focus_search, self.selected.as_deref(), &mut self.actions);
+                    });
+            }
+            let margin = if compact { Margin::same(8) } else { Margin { left: 12, right: 16, top: 12, bottom: 12 } };
+            if !(compact && self.show_people) {
             egui::CentralPanel::default()
-                .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 12, right: 16, top: 12, bottom: 12 }))
+                .frame(Frame::new().fill(p.bg).inner_margin(margin))
                 .show(ui, |ui| {
                     if doc.people().is_empty() && !matches!(self.tab, TAB_GRAPH | TAB_MEDIA | TAB_OVERVIEW) {
                         views::empty_tree(ui, &mut self.actions);
@@ -2182,6 +2246,7 @@ impl eframe::App for GenieApp {
                         }
                     }
                 });
+            }
             self.doc = Some(doc);
             if self.selected.is_none() || self.selected.as_ref().is_some_and(|x| self.doc.as_ref().unwrap().person(x).is_none()) {
                 self.fix_selection();

@@ -262,7 +262,7 @@ impl RemoteUi {
             .collapsible(false)
             .resizable(true)
             .default_size([900.0_f32.min(screen.x - 40.0), 680.0_f32.min(screen.y - 80.0)])
-            .min_size([520.0, 320.0])
+            .min_size([crate::widgets::fit_width(ctx, 520.0), 320.0])
             .default_pos(egui::pos2((screen.x - 900.0).max(40.0) / 2.0, 60.0))
             .show(ctx, |ui| {
                 ui.label(RichText::new(format!("Every change to the tree on {}, and who made it", remote.host())).color(p.text_muted));
@@ -387,7 +387,7 @@ impl RemoteUi {
                 .subtitle(c.what.clone())
                 .header_icon(glyphs::TRIANGLE_ALERT.to_string())
                 .header_accent(Accent::Amber)
-                .max_width(480.0)
+                .max_width(crate::widgets::fit_width(ctx, 480.0))
                 .show(ctx, |ui| {
                     match &c.blocked {
                         None => {
@@ -462,7 +462,7 @@ impl RemoteUi {
             .closable(!web)
             .close_on_backdrop(!web)
             .close_on_escape(!web)
-            .max_width(440.0)
+            .max_width(crate::widgets::fit_width(ctx, 440.0))
             .show(ctx, |ui| {
                 if let Some(r) = &d.reason {
                     ui.label(RichText::new(r).color(Theme::current(ui.ctx()).palette.amber));
@@ -523,7 +523,7 @@ impl RemoteUi {
             .subtitle(format!("Choose whose version to keep, then sync again with {}", remote.host()))
             .header_icon(glyphs::TRIANGLE_ALERT.to_string())
             .header_accent(Accent::Amber)
-            .max_width(560.0)
+            .max_width(crate::widgets::fit_width(ctx, 560.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
                     for c in &d.conflicts {
@@ -563,7 +563,7 @@ impl RemoteUi {
     fn password_dialog(&mut self, ctx: &egui::Context, remote: &mut Remote) {
         let Some(d) = self.password.as_mut() else { return };
         let mut go = false;
-        Modal::new("password", &mut d.open).heading("Change your password").subtitle(format!("For {} on {}", remote.state.user.username, remote.host())).max_width(420.0).show(ctx, |ui| {
+        Modal::new("password", &mut d.open).heading("Change your password").subtitle(format!("For {} on {}", remote.state.user.username, remote.host())).max_width(crate::widgets::fit_width(ctx, 420.0)).show(ctx, |ui| {
             ui.add(TextInput::new(&mut d.current).label("Current password").password(true).id_salt("pw_cur"));
             ui.add(TextInput::new(&mut d.new).label("New password").hint("At least 10 characters").password(true).id_salt("pw_new"));
             ui.add(TextInput::new(&mut d.again).label("New password again").password(true).id_salt("pw_again"));
@@ -604,7 +604,7 @@ impl RemoteUi {
             .heading("Accounts")
             .subtitle(format!("Who can see and edit the tree on {}", remote.host()))
             .header_icon(glyphs::KEY.to_string())
-            .max_width(720.0)
+            .max_width(crate::widgets::fit_width(ctx, 720.0))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().max_height(340.0).show(ui, |ui| {
                     if d.accounts.is_empty() {
@@ -685,7 +685,7 @@ impl RemoteUi {
             .subtitle(subtitle)
             .header_icon(glyphs::DOWNLOAD.to_string())
             .header_accent(if replace { Accent::Amber } else { Accent::Blue })
-            .max_width(480.0)
+            .max_width(crate::widgets::fit_width(ctx, 480.0))
             .show(ctx, |ui| {
                 if replace {
                     muted(ui, "The tree there now is replaced, and kept in its history. Changes others haven't synced yet will conflict with it.");
@@ -759,7 +759,7 @@ pub fn refresh_accounts(remote: &mut Remote, ctx: &egui::Context) {
 /// "Syncing with genie.henshaw.us…", over everything while the tree is exchanged.
 pub fn syncing_overlay(ctx: &egui::Context, host: &str) {
     let mut open = true;
-    Modal::new("syncing", &mut open).closable(false).close_on_backdrop(false).close_on_escape(false).max_width(360.0).show(ctx, |ui: &mut Ui| {
+    Modal::new("syncing", &mut open).closable(false).close_on_backdrop(false).close_on_escape(false).max_width(crate::widgets::fit_width(ctx, 360.0)).show(ctx, |ui: &mut Ui| {
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(format!("Syncing with {host}…"));

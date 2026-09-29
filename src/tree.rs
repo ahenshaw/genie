@@ -77,6 +77,15 @@ struct Canvas<'a> {
 }
 
 impl TreeView {
+    fn generations_picker(&mut self, ui: &mut Ui) {
+        let p = Theme::current(ui.ctx()).palette;
+        ui.label(RichText::new("Generations").size(12.0).color(p.text_muted));
+        ui.add(SegmentedControl::new(&mut self.gens_idx, GENERATIONS).size(SegmentedSize::Small).id_salt("tree_gens"));
+        if self.mode == MODE_BOTH {
+            ui.label(RichText::new("each way").size(12.0).color(p.text_faint));
+        }
+    }
+
     pub fn show_both(&mut self) {
         self.mode = MODE_BOTH;
     }
@@ -102,11 +111,11 @@ impl TreeView {
                 .size(SegmentedSize::Small)
                 .id_salt("tree_mode"),
             );
-            ui.add_space(12.0);
-            ui.label(RichText::new("Generations").size(12.0).color(p.text_muted));
-            ui.add(SegmentedControl::new(&mut self.gens_idx, GENERATIONS).size(SegmentedSize::Small).id_salt("tree_gens"));
-            if self.mode == MODE_BOTH {
-                ui.label(RichText::new("each way").size(12.0).color(p.text_faint));
+            // On a phone, generations get a row of their own below.
+            let compact = crate::widgets::compact(ui.ctx());
+            if !compact {
+                ui.add_space(12.0);
+                self.generations_picker(ui);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui.add(Button::new(format!("{}  Fit", glyphs::ZOOM_OUT)).outline().size(ButtonSize::Small)).clicked() {
@@ -121,6 +130,9 @@ impl TreeView {
                 }
             });
         });
+        if crate::widgets::compact(ui.ctx()) {
+            ui.horizontal(|ui| self.generations_picker(ui));
+        }
         ui.add_space(8.0);
 
         let key = (root.to_string(), self.mode, gens);

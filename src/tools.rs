@@ -116,7 +116,7 @@ impl ToolsUi {
         Modal::new("wikitree_photos", &mut st.open)
             .heading("Get photos from WikiTree")
             .subtitle("Photos from wikitree.com for people in your tree")
-            .max_width(760.0)
+            .max_width(crate::widgets::fit_width(ctx, 760.0))
             .show(ctx, |ui| {
                 ui.spacing_mut().item_spacing.y = 8.0;
                 match &mut st.stage {
@@ -288,7 +288,7 @@ impl ToolsUi {
         Modal::new("dupe_people", &mut st.open)
             .heading("Find duplicate people")
             .subtitle(subtitle)
-            .max_width((screen.width() - 80.0).clamp(700.0, 1200.0))
+            .max_width(crate::widgets::fit_width(ctx, (screen.width() - 80.0).clamp(700.0, 1200.0)))
             .show(ctx, |ui| {
                 let height = (screen.height() - 240.0).clamp(300.0, 760.0);
                 if st.list.is_empty() {
@@ -403,7 +403,7 @@ impl ToolsUi {
         Modal::new("dupe_sources", &mut st.open)
             .heading("Find duplicate sources")
             .subtitle(if st.groups.is_empty() { "No duplicate sources".to_string() } else { format!("{} sources recorded more than once · {extra} extra copies", st.groups.len()) })
-            .max_width(760.0)
+            .max_width(crate::widgets::fit_width(ctx, 760.0))
             .show(ctx, |ui| {
                 if st.groups.is_empty() {
                     ui.add_space(12.0);

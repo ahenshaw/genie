@@ -127,6 +127,20 @@ pub fn person_chip(ui: &mut Ui, doc: &Document, xref: &str, caption: Option<&str
 }
 
 /// A dashed placeholder inviting the user to add a relative.
+/// Narrower than this, the app lays itself out for a phone.
+pub const COMPACT_WIDTH: f32 = 720.0;
+
+/// A phone-sized screen (or a narrow window): one thing at a time.
+pub fn compact(ctx: &egui::Context) -> bool {
+    ctx.content_rect().width() < COMPACT_WIDTH
+}
+
+/// `width`, or less if the screen is narrower: for dialogs and drawers, so
+/// they never run off a phone's screen.
+pub fn fit_width(ctx: &egui::Context, width: f32) -> f32 {
+    width.min(ctx.content_rect().width() - 16.0).max(200.0)
+}
+
 /// Signed in to a shared tree with an account that can't change it: the app
 /// publishes this each frame so views can leave out their editing controls.
 pub fn read_only(ctx: &egui::Context) -> bool {
