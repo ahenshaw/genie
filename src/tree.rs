@@ -551,7 +551,9 @@ impl Canvas<'_> {
         } else {
             total - usize::from(follow.is_some())
         };
-        t.units.push(Unit { xref: x, depth, family, width, repeat, hidden, kids: Vec::new(), place: Place::Node(n) });
+        let partners = fams.iter().filter(|f| f.1.is_some()).count();
+        let left_spouse = !repeat && partners >= 2 && fams.first().is_some_and(|f| f.1.is_some());
+        t.units.push(Unit { xref: x, depth, family, width, repeat, hidden, kids: Vec::new(), place: Place::Node(n), left_spouse });
         if repeat || (beyond && follow.is_none()) {
             return (u, n);
         }
@@ -579,6 +581,8 @@ impl Canvas<'_> {
             t.nodes.push(TidyNode { size: STACK_INDENT + widest + tail, span, children: Vec::new() });
             for (row, &(ku, _)) in kids.iter().enumerate() {
                 t.units[ku].place = Place::Stacked { group: g, row };
+                // The column's spine runs down the left: partners go right.
+                t.units[ku].left_spouse = false;
             }
             t.nodes[n].children = vec![g];
         } else {
@@ -600,22 +604,30 @@ impl Canvas<'_> {
             }
             let me = t.person_rect(i);
             let mut drops = Vec::new();
-            let mut slot = 1;
-            for (_, sp, _) in self.families_of(&u.xref) {
-                if let Some(sp) = sp {
-                    let r_left = me.left() + slot as f32 * (BOX_W + COUPLE_GAP);
-                    let stroke = if self.on_path(&u.xref, &sp) { self.path_stroke(ui) } else { link };
-                    self.line(ui, pos2(r_left - COUPLE_GAP, me.center().y), pos2(r_left, me.center().y), stroke);
-                    drops.push(pos2(r_left - COUPLE_GAP / 2.0, me.center().y));
-                    slot += 1;
-                } else {
-                    drops.push(me.center_bottom());
+            for (sp, r) in partner_rects(u, me, &self.families_of(&u.xref)) {
+                match (sp, r) {
+                    (Some(sp), Some(r)) => {
+                        // The link spans the gap beside the partner's box, on
+                        // whichever side of the person it is.
+                        let (from_x, to_x) = if r.left() < me.left() { (r.right(), me.left()) } else { (r.left() - COUPLE_GAP, r.left()) };
+                        let stroke = if self.on_path(&u.xref, &sp) { self.path_stroke(ui) } else { link };
+                        self.line(ui, pos2(from_x, me.center().y), pos2(to_x, me.center().y), stroke);
+                        drops.push(pos2((from_x + to_x) / 2.0, me.center().y));
+                    }
+                    _ => drops.push(me.center_bottom()),
                 }
             }
-            let bus_y = me.bottom() + GAP_V / 2.0;
+            // With children by more than one partner, each family's line to
+            // its children runs at its own height: the leftmost lowest, each
+            // further right higher. Families lie left to right in that
+            // order, so no family's lines cross another's.
+            let with_kids: Vec<usize> = (0..drops.len()).filter(|fi| u.kids.iter().any(|&c| t.units[c].family == *fi)).collect();
             for (fi, from) in drops.iter().enumerate() {
                 let kids: Vec<usize> = u.kids.iter().copied().filter(|&c| t.units[c].family == fi).collect();
                 let Some(&first) = kids.first() else { continue };
+                let rank = with_kids.iter().position(|f| *f == fi).unwrap_or(0);
+                let level = if with_kids.len() <= 1 { 0.5 } else { 0.75 - 0.5 * rank as f32 / (with_kids.len() - 1) as f32 };
+                let bus_y = me.bottom() + GAP_V * level;
                 let home_kid = kids.iter().copied().find(|&c| self.on_path(&u.xref, &t.units[c].xref));
                 let hl = self.path_stroke(ui);
                 self.line(ui, *from, pos2(from.x, bus_y), line);
@@ -663,13 +675,10 @@ impl Canvas<'_> {
                 continue;
             }
             let fams = self.families_of(&u.xref);
-            let mut slot = 1;
-            for (_, sp, _) in &fams {
-                if let Some(s) = sp {
-                    let r = me.translate(vec2(slot as f32 * (BOX_W + COUPLE_GAP), 0.0));
-                    self.person_box(ui, r, s);
+            for (sp, r) in partner_rects(u, me, &fams) {
+                if let (Some(s), Some(r)) = (sp, r) {
+                    self.person_box(ui, r, &s);
                     bounds = bounds.union(r);
-                    slot += 1;
                 }
             }
             let has_kids = fams.iter().any(|f| !f.2.is_empty());
@@ -703,6 +712,28 @@ impl Canvas<'_> {
         }
         bounds
     }
+}
+
+/// Each of a unit's families, in order: its partner and where their box
+/// goes, beside the person's box `me`. The first partner is on the left
+/// when the unit says so; the rest follow on the right.
+fn partner_rects(u: &Unit, me: Rect, fams: &[(String, Option<String>, Vec<String>)]) -> Vec<(Option<String>, Option<Rect>)> {
+    let step = BOX_W + COUPLE_GAP;
+    let mut right = 1.0;
+    fams.iter()
+        .enumerate()
+        .map(|(j, (_, sp, _))| {
+            let Some(sp) = sp else { return (None, None) };
+            let r = if u.left_spouse && j == 0 {
+                me.translate(vec2(-step, 0.0))
+            } else {
+                let r = me.translate(vec2(right * step, 0.0));
+                right += 1.0;
+                r
+            };
+            (Some(sp.clone()), Some(r))
+        })
+        .collect()
 }
 
 /// A place in the pedigree: a known ancestor or an invitation to add one.
@@ -747,6 +778,10 @@ struct Unit {
     /// Units of this person's children, as drawn.
     kids: Vec<usize>,
     place: Place,
+    /// With two or more partners, the first is drawn to the person's left
+    /// and the rest to the right, as in the profile's family map, so each
+    /// couple's children hang from their own link.
+    left_spouse: bool,
 }
 
 #[derive(Default)]
@@ -758,12 +793,13 @@ struct DescendantTree {
 }
 
 impl DescendantTree {
-    /// The unit's own (first) box.
+    /// The unit's own box (right of a first partner drawn on the left).
     fn person_rect(&self, u: usize) -> Rect {
         let unit = &self.units[u];
         let row_top = unit.depth as f32 * (BOX_H + GAP_V);
+        let shift = if unit.left_spouse { BOX_W + COUPLE_GAP } else { 0.0 };
         let (left, top) = match unit.place {
-            Place::Node(n) => (self.xs[n] - unit.width / 2.0, row_top),
+            Place::Node(n) => (self.xs[n] - unit.width / 2.0 + shift, row_top),
             Place::Stacked { group, row } => (
                 self.xs[group] - self.nodes[group].size / 2.0 + STACK_INDENT,
                 row_top + row as f32 * (BOX_H + GAP_Y),
