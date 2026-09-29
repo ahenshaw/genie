@@ -216,7 +216,7 @@ impl GenieApp {
         let mut last_open = None;
         let mut app = Self {
             doc: None,
-            theme: BuiltInTheme::Slate,
+            theme: BuiltInTheme::Paper,
             recent: Vec::new(),
             selected: None,
             history: Vec::new(),
