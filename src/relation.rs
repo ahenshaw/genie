@@ -26,6 +26,10 @@ pub struct RelationView {
     subject_query: String,
     reference_query: String,
     cached: Option<(u64, String, String, Vec<Kinship>)>,
+    /// What part of the chart is in view (pan and zoom); `None` fits it.
+    view: Option<Rect>,
+    /// The chart `view` was for: a different one is fitted afresh.
+    view_key: Option<(u64, String, String, usize)>,
 }
 
 impl RelationView {
@@ -114,15 +118,42 @@ impl RelationView {
         });
         ui.add_space(10.0);
 
+        // A new chart starts fitted to the view.
+        let key = (doc.revision, reference.to_string(), subject.to_string(), self.path);
+        if self.view_key.as_ref() != Some(&key) {
+            self.view = None;
+            self.view_key = Some(key);
+        }
+        ui.horizontal(|ui| {
+            let hint = "Drag to move · pinch or Ctrl+scroll to zoom";
+            ui.label(RichText::new(hint).size(12.0).color(p.text_faint));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(Button::new(format!("{}  Fit", glyphs::ZOOM_OUT)).outline().size(ButtonSize::Small)).clicked() {
+                    self.view = None;
+                }
+            });
+        });
+        ui.add_space(4.0);
         egui::Frame::new()
             .fill(mix(p.bg, p.card, 0.5))
             .stroke(Stroke::new(1.0, p.border))
             .corner_radius(12)
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
-                egui::ScrollArea::both().auto_shrink([false, false]).id_salt("rel_chart").show(ui, |ui| {
+                // Rect::ZERO tells the scene to fit what's in it.
+                let fitting = self.view.is_none();
+                let mut view = self.view.unwrap_or(Rect::ZERO);
+                let shown = ui.available_size_before_wrap();
+                // Pans by dragging and zooms by pinching (or Ctrl+scroll), on a
+                // phone as with a mouse; the cards in it stay clickable.
+                egui::Scene::new().zoom_range(0.1..=2.0).show(ui, &mut view, |ui| {
                     chart(ui, doc, &k, actions);
                 });
+                // Fitting a small chart would blow it up; show it actual size.
+                if fitting && view.width() < shown.x && view.height() < shown.y {
+                    view = Rect::from_center_size(view.center(), shown);
+                }
+                self.view = Some(view);
             });
     }
 }
@@ -259,10 +290,9 @@ fn chart(ui: &mut Ui, doc: &Document, k: &Kinship, actions: &mut Vec<Action>) {
     let max_col = placed.iter().map(|q| q.col).max().unwrap_or(0);
     let row = CHIP_H + LABEL_H + GAP_Y;
     let size = vec2(MARGIN * 2.0 + (max_col + 1) as f32 * (CHIP_W + GAP_X) - GAP_X, MARGIN * 2.0 + (max_level - min_level + 1) as f32 * row - GAP_Y);
-    let avail = ui.available_size();
-    let (area, _) = ui.allocate_exact_size(size.max(avail), Sense::hover());
-    // Centre the chart when it's smaller than the view.
-    let offset = vec2(((avail.x - size.x) / 2.0).max(0.0), ((avail.y - size.y) / 2.0).max(0.0));
+    // The scene around it centres and scales it.
+    let (area, _) = ui.allocate_exact_size(size, Sense::hover());
+    let offset = vec2(0.0, 0.0);
     let chip_rect = |q: &Placed| {
         let x = area.left() + offset.x + MARGIN + q.col as f32 * (CHIP_W + GAP_X);
         let y = area.top() + offset.y + MARGIN + (q.level - min_level) as f32 * row + LABEL_H;
