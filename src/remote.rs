@@ -101,17 +101,69 @@ pub struct SyncState {
 /// One change in the tree's history.
 #[derive(Clone, Debug, Deserialize)]
 pub struct ChangeRow {
+    #[serde(default)]
+    pub revision: i64,
+    #[serde(default)]
+    pub xref: String,
+    #[serde(default)]
+    pub tag: String,
     pub action: String,
     pub label: String,
     pub user: Option<String>,
+    #[serde(default)]
+    pub username: Option<String>,
     /// UTC, `2026-09-28T14:12:00Z`.
     pub at: String,
+    /// What the save was, when it wasn't an ordinary edit ("Reverted …").
+    #[serde(default)]
+    pub note: String,
 }
 
 impl ChangeRow {
     pub fn day(&self) -> String {
         crate::model::pretty_date(&self.at.get(..10).map(iso_to_gedcom).unwrap_or_default())
     }
+
+    /// "29 Sep 2026 14:05 UTC".
+    pub fn when(&self) -> String {
+        match self.at.get(11..16) {
+            Some(t) => format!("{} {t} UTC", self.day()),
+            None => self.day(),
+        }
+    }
+}
+
+/// Which changes the edit report shows.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ReportQuery {
+    /// `YYYY-MM-DD`, UTC, inclusive.
+    pub from: Option<String>,
+    pub to: Option<String>,
+    pub username: Option<String>,
+}
+
+/// A later change that stands in the way of a revert.
+#[derive(Clone, Debug, Deserialize)]
+pub struct LaterEdit {
+    pub label: String,
+    pub user: Option<String>,
+    pub at: String,
+}
+
+/// Today's date in UTC, `YYYY-MM-DD`, or `days` before it.
+pub fn utc_day(days_ago: i64) -> String {
+    let secs = web_time::SystemTime::now().duration_since(web_time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
+    // Days since 1970-01-01 to a civil date (Howard Hinnant's algorithm).
+    let z = secs.div_euclid(86_400) - days_ago + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 fn iso_to_gedcom(d: &str) -> String {
@@ -453,6 +505,11 @@ pub enum Event {
     WebMedia(Vec<(String, String)>),
     /// Signed out everywhere.
     SignedOut,
+    /// Rows of the edit report; `more` when there are older ones to page to.
+    Report { rows: Vec<ChangeRow>, append: bool, more: bool },
+    Reverted { undone: usize },
+    /// The revert would also undo these later changes.
+    RevertBlocked { message: String, later: Vec<LaterEdit> },
     Failed(String),
 }
 
@@ -666,7 +723,7 @@ impl Remote {
     }
 
     pub fn load_accounts(&mut self, ctx: &egui::Context) {
-        self.ask(ctx, Some(Busy::Other), "GET", "/api/users".into(), None, |r| match success(r).and_then(|r| r.json()) {
+        self.ask(ctx, None, "GET", "/api/users".into(), None, |r| match success(r).and_then(|r| r.json()) {
             Ok(list) => Event::Accounts(list),
             Err(e) => Event::Failed(e),
         });
@@ -693,6 +750,56 @@ impl Remote {
         self.ask(ctx, Some(Busy::Other), "POST", "/api/password".into(), Some(body), |r| match success(r).and_then(|r| r.json::<Session>()) {
             Ok(s) => Event::PasswordChanged { token: s.token, expires_at: s.expires_at },
             Err(e) => Event::Failed(e),
+        });
+    }
+
+    /// A page of the edit report, newest first; `before` for older ones.
+    pub fn load_report(&mut self, ctx: &egui::Context, q: &ReportQuery, before: Option<i64>) {
+        const PAGE: usize = 200;
+        let mut path = format!("/api/changes?limit={PAGE}");
+        for (k, v) in [("from", &q.from), ("to", &q.to), ("username", &q.username)] {
+            if let Some(v) = v {
+                path.push_str(&format!("&{k}={}", url_escape(v)));
+            }
+        }
+        if let Some(b) = before {
+            path.push_str(&format!("&before={b}"));
+        }
+        let append = before.is_some();
+        // Reading only: it mustn't hold up a sync.
+        self.ask(ctx, None, "GET", path, None, move |r| match success(r).and_then(|r| r.json::<Vec<ChangeRow>>()) {
+            Ok(mut rows) => {
+                let more = rows.len() == PAGE;
+                // A page ends mid-save: leave that save for the next page,
+                // unless it's all there is.
+                if more && let Some(last) = rows.last().map(|r| r.revision) && rows.iter().any(|r| r.revision != last) {
+                    rows.retain(|r| r.revision != last);
+                }
+                Event::Report { rows, append, more }
+            }
+            Err(e) => Event::Failed(e),
+        });
+    }
+
+    /// Undoes a save, or one record of it.
+    pub fn revert(&mut self, ctx: &egui::Context, revision: i64, xref: Option<String>, force: bool) {
+        let body = serde_json::json!({ "revision": revision, "xref": xref, "force": force });
+        self.ask(ctx, Some(Busy::Other), "POST", "/api/revert".into(), Some(body), |r| {
+            let r = match r {
+                Ok(r) => r,
+                Err(e) => return Event::Failed(e),
+            };
+            if r.status == 409
+                && let Ok(v) = serde_json::from_slice::<serde_json::Value>(&r.body)
+                && let Some(later) = v.get("later")
+            {
+                let message = v.get("error").and_then(|e| e.as_str()).unwrap_or_default().to_string();
+                return Event::RevertBlocked { message, later: serde_json::from_value(later.clone()).unwrap_or_default() };
+            }
+            match success(Ok(r)).and_then(|r| r.json::<serde_json::Value>()) {
+                Ok(v) => Event::Reverted { undone: v.get("undone").and_then(|u| u.as_u64()).unwrap_or(0) as usize },
+                Err(e) => Event::Failed(e),
+            }
         });
     }
 
@@ -1027,7 +1134,12 @@ mod tests {
 
     #[test]
     fn change_dates_read_nicely() {
-        let row = ChangeRow { action: "modify".into(), label: String::new(), user: None, at: "2026-10-03T14:00:00Z".into() };
+        let row = ChangeRow { revision: 1, xref: "I1".into(), tag: "INDI".into(), username: None, note: String::new(), action: "modify".into(), label: String::new(), user: None, at: "2026-10-03T14:00:00Z".into() };
         assert_eq!(row.day(), "3 Oct 2026");
+        assert_eq!(row.when(), "3 Oct 2026 14:00 UTC");
+        // Civil dates from the clock: well-formed, and yesterday before today.
+        let (today, yesterday) = (utc_day(0), utc_day(1));
+        assert_eq!(today.len(), 10);
+        assert!(yesterday < today);
     }
 }

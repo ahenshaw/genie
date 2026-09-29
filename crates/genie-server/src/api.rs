@@ -27,6 +27,7 @@ pub fn router(state: State) -> Router {
         .route("/api/password", post(change_password))
         .route("/api/tree", get(get_tree).post(save_tree).layer(DefaultBodyLimit::max(MAX_TREE)))
         .route("/api/changes", get(changes))
+        .route("/api/revert", post(revert))
         .route("/api/users", get(list_users).post(add_user))
         .route("/api/users/{id}", patch(update_user))
         .route("/api/media", get(media::manifest).put(media::upload).layer(DefaultBodyLimit::disable()))
@@ -424,8 +425,18 @@ async fn save_tree(AxState(st): AxState<State>, user: CurrentUser, Json(req): Js
 struct ChangesQuery {
     /// Only changes made after this revision.
     since: Option<i64>,
+    /// Only changes before this revision: the next page of an older list.
+    before: Option<i64>,
     /// Only changes to this record.
     xref: Option<String>,
+    /// Only changes on or after this day, `YYYY-MM-DD` (UTC).
+    from: Option<String>,
+    /// Only changes on or before this day, `YYYY-MM-DD` (UTC).
+    to: Option<String>,
+    /// Only changes by this account.
+    username: Option<String>,
+    /// At most this many (default and most 500).
+    limit: Option<u32>,
 }
 
 #[derive(Serialize, sqlx::FromRow)]
@@ -435,25 +446,56 @@ struct ChangeOut {
     tag: String,
     action: String,
     label: String,
+    /// The name shown for who made it.
     user: Option<String>,
+    username: Option<String>,
     at: String,
+    /// What the save was, when it wasn't an ordinary edit ("Reverted …").
+    note: String,
 }
 
-/// Who changed what: since a revision (for "3 changes by Alice"), or for one
-/// record (its history). Newest first. Guests see only records they see in full.
+fn day(s: &Option<String>) -> ApiResult<Option<String>> {
+    match s.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+        None => Ok(None),
+        Some(d) if d.len() == 10 && d.as_bytes()[4] == b'-' && d.as_bytes()[7] == b'-' && d.bytes().enumerate().all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit()) => Ok(Some(d.to_string())),
+        Some(d) => Err(ApiError::bad_request(format!("Dates are written YYYY-MM-DD, not {d}."))),
+    }
+}
+
+/// Who changed what, newest first: since a revision (for "3 changes by
+/// Alice"), for one record (its history), or for a report by day and
+/// account. Guests see only records they see in full.
 async fn changes(AxState(st): AxState<State>, user: CurrentUser, Query(q): Query<ChangesQuery>) -> ApiResult<Json<Vec<ChangeOut>>> {
+    let (from, to) = (day(&q.from)?, day(&q.to)?);
+    let username = q.username.as_deref().map(|u| u.trim().to_lowercase()).filter(|u| !u.is_empty());
     let rows = sqlx::query_as::<_, ChangeOut>(
         "SELECT c.revision_id AS revision, c.xref, c.record_tag AS tag, CAST(c.action AS CHAR) AS action, c.label,
-                COALESCE(NULLIF(u.display_name, ''), u.username) AS user,
-                DATE_FORMAT(c.created_at, '%Y-%m-%dT%H:%i:%sZ') AS at
-         FROM changes c LEFT JOIN users u ON u.id = c.user_id
-         WHERE c.revision_id > ? AND (? IS NULL OR c.xref = ?)
+                COALESCE(NULLIF(u.display_name, ''), u.username) AS user, u.username,
+                DATE_FORMAT(c.created_at, '%Y-%m-%dT%H:%i:%sZ') AS at, r.note
+         FROM changes c
+         JOIN revisions r ON r.id = c.revision_id
+         LEFT JOIN users u ON u.id = c.user_id
+         WHERE c.revision_id > ?
+           AND (? IS NULL OR c.revision_id < ?)
+           AND (? IS NULL OR c.xref = ?)
+           AND (? IS NULL OR c.created_at >= ?)
+           AND (? IS NULL OR c.created_at < DATE_ADD(?, INTERVAL 1 DAY))
+           AND (? IS NULL OR u.username = ?)
          ORDER BY c.revision_id DESC, c.id DESC
-         LIMIT 500",
+         LIMIT ?",
     )
     .bind(q.since.unwrap_or(0))
+    .bind(q.before)
+    .bind(q.before)
     .bind(&q.xref)
     .bind(&q.xref)
+    .bind(&from)
+    .bind(&from)
+    .bind(&to)
+    .bind(&to)
+    .bind(&username)
+    .bind(&username)
+    .bind(q.limit.unwrap_or(500).clamp(1, 500))
     .fetch_all(&st.pool)
     .await?;
     if user.role != Role::Guest {
@@ -462,4 +504,104 @@ async fn changes(AxState(st): AxState<State>, user: CurrentUser, Query(q): Query
     let Some(head) = store::head(&st).await? else { return Ok(Json(Vec::new())) };
     let visible = rows.into_iter().filter(|r| head.history_visible(Role::Guest, st.config.living_years, &r.xref)).collect();
     Ok(Json(visible))
+}
+
+// ---- reverts --------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct Revert {
+    /// The save to undo.
+    revision: i64,
+    /// Just this record of it; otherwise everything that save changed.
+    xref: Option<String>,
+    /// Undo it even though the same records were changed again afterwards.
+    #[serde(default)]
+    force: bool,
+}
+
+/// Undoes a save, or one record of it, as a new revision of its own: the
+/// records go back to how they were just before it. Administrators only.
+///
+/// Refused with 409 when those records were changed again later (listed,
+/// so the caller can decide to `force`), or when undoing it would leave
+/// links to records that no longer exist.
+async fn revert(AxState(st): AxState<State>, user: CurrentUser, Json(req): Json<Revert>) -> ApiResult<Response> {
+    user.require(Role::Admin)?;
+    let _serial = st.write_lock.lock().await;
+    let mut tx = st.pool.begin().await?;
+    let head_id = store::lock_tree(&mut tx).await?.ok_or_else(ApiError::not_found)?;
+    let parent: Option<(Option<i64>,)> = sqlx::query_as("SELECT parent_id FROM revisions WHERE id = ?").bind(req.revision).fetch_optional(&mut *tx).await?;
+    let (parent,) = parent.ok_or_else(|| ApiError::bad_request(format!("There's no revision {}.", req.revision)))?;
+    let text = |id: Option<i64>| {
+        let pool = st.pool.clone();
+        async move {
+            match id {
+                Some(id) => store::revision_text(&pool, id).await?.ok_or_else(|| ApiError::internal(format!("revision {id} is missing"))),
+                None => Ok(String::new()),
+            }
+        }
+    };
+    let (head_text, after_text, before_text) = (text(Some(head_id)).await?, text(Some(req.revision)).await?, text(parent).await?);
+
+    // Records of that save changed again since.
+    let xrefs: Vec<(String,)> = sqlx::query_as("SELECT xref FROM changes WHERE revision_id = ? AND (? IS NULL OR xref = ?)")
+        .bind(req.revision)
+        .bind(&req.xref)
+        .bind(&req.xref)
+        .fetch_all(&mut *tx)
+        .await?;
+    if xrefs.is_empty() {
+        return Err(ApiError::bad_request("That save didn't change that record."));
+    }
+    if !req.force {
+        let mut later = Vec::new();
+        for (x,) in &xrefs {
+            let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+                "SELECT c.label, COALESCE(NULLIF(u.display_name, ''), u.username), DATE_FORMAT(c.created_at, '%Y-%m-%dT%H:%i:%sZ')
+                 FROM changes c LEFT JOIN users u ON u.id = c.user_id
+                 WHERE c.xref = ? AND c.revision_id > ? ORDER BY c.revision_id",
+            )
+            .bind(x)
+            .bind(req.revision)
+            .fetch_all(&mut *tx)
+            .await?;
+            later.extend(rows.into_iter().map(|(label, who, at)| serde_json::json!({ "xref": x, "label": label, "user": who, "at": at })));
+        }
+        if !later.is_empty() {
+            let body = serde_json::json!({ "error": "Those records were changed again afterwards; reverting would undo that too.", "later": later });
+            return Ok((StatusCode::CONFLICT, Json(body)).into_response());
+        }
+    }
+
+    let only = req.xref.clone();
+    let outcome = tokio::task::spawn_blocking(move || {
+        let head = store::parse(&head_text);
+        let (records, undone) = sync::revert(&head, &store::parse(&before_text), &store::parse(&after_text), only.as_deref());
+        let before: std::collections::HashSet<(String, String)> = sync::dangling(&head).into_iter().collect();
+        let broken: Vec<(String, String)> = sync::dangling(&records).into_iter().filter(|d| !before.contains(d)).collect();
+        let (new_doc, text) = store::canonical(records);
+        let old_doc = Document::from_records(head.clone());
+        let changes = store::labelled(sync::diff(&head, &store::parse(&text)), &old_doc, &new_doc);
+        (text, new_doc.people().len(), changes, undone.len(), broken, old_doc)
+    })
+    .await
+    .map_err(ApiError::internal)?;
+    let (text, people, changes, undone, broken, old_doc) = outcome;
+    if !broken.is_empty() {
+        let names: Vec<String> = broken.iter().map(|(from, to)| format!("{} → {}", store::label(&old_doc, from), store::label(&old_doc, to))).collect();
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            format!("Reverting that would leave links to records that no longer exist ({}). Revert the whole save instead.", names.join(", ")),
+        ));
+    }
+    if changes.is_empty() {
+        return Ok(Json(serde_json::json!({ "revision": head_id, "unchanged": true, "undone": undone })).into_response());
+    }
+    let what = match &req.xref {
+        Some(x) => format!("Reverted {} from revision {}", store::label(&old_doc, x).trim().to_string().chars().take(120).collect::<String>(), req.revision),
+        None => format!("Reverted revision {}", req.revision),
+    };
+    let rev = store::commit_revision(&mut tx, Some(head_id), user.id, &text, people, &what, &changes).await?;
+    tx.commit().await?;
+    Ok(Json(serde_json::json!({ "revision": rev, "unchanged": false, "undone": undone })).into_response())
 }

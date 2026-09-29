@@ -378,3 +378,79 @@ async fn browsers_sign_in_with_a_cookie_that_only_this_site_can_use() {
     let _ = std::fs::remove_dir_all(&web);
     env.done().await;
 }
+
+#[tokio::test]
+async fn the_edit_report_filters_and_reverts_put_things_back() {
+    let Some(env) = Env::new().await else { return };
+    let admin = env.user("admin", "Admin", Role::Admin).await;
+    let alice = env.user("alice", "Alice", Role::Editor).await;
+    let bob = env.user("bob", "Bob", Role::Editor).await;
+    env.seed(&admin, &sample()).await;
+
+    let save = |token: &str, from: &str, to: &str| {
+        let (token, from, to) = (token.to_string(), from.to_string(), to.to_string());
+        let env = &env;
+        async move {
+            let (rev, text) = env.tree(&token).await;
+            assert!(text.contains(&from), "{from}");
+            let (status, body) = env.call("POST", "/api/tree", Some(&token), Some(json!({"base_revision": rev, "gedcom": text.replacen(&from, &to, 1)}))).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body["revision"].as_i64().unwrap()
+        }
+    };
+    // Alice renames Thomas; Bob, in one save, adds a child to Thomas's family.
+    let r_alice = save(&alice, "NAME Thomas /Hartwell/", "NAME Tom /Hartwell/").await;
+    let (_, text) = env.tree(&bob).await;
+    let with_child = text
+        .replacen("1 CHIL @I3@", "1 CHIL @I3@\r\n1 CHIL @I99@", 1)
+        .replace("0 TRLR", "0 @I99@ INDI\r\n1 NAME New /Child/\r\n1 FAMC @F1@\r\n0 TRLR");
+    let (rev, _) = env.tree(&bob).await;
+    let (status, body) = env.call("POST", "/api/tree", Some(&bob), Some(json!({"base_revision": rev, "gedcom": with_child}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let r_bob = body["revision"].as_i64().unwrap();
+
+    // The report, by account and by day.
+    let (_, rows) = env.call("GET", "/api/changes?username=alice", Some(&admin), None).await;
+    assert_eq!(rows.as_array().unwrap().len(), 1);
+    assert_eq!((rows[0]["user"].as_str(), rows[0]["label"].as_str()), (Some("Alice"), Some("Tom Hartwell")));
+    let today = time::OffsetDateTime::now_utc().date().to_string();
+    let (_, rows) = env.call("GET", &format!("/api/changes?from={today}&to={today}&since=1"), Some(&admin), None).await;
+    assert_eq!(rows.as_array().unwrap().len(), 3, "{rows}");
+    let (_, none) = env.call("GET", "/api/changes?to=2000-01-01", Some(&admin), None).await;
+    assert_eq!(none, json!([]));
+    let (status, _) = env.call("GET", "/api/changes?from=yesterday", Some(&admin), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, page) = env.call("GET", &format!("/api/changes?before={r_bob}&since=1"), Some(&admin), None).await;
+    assert!(page.as_array().unwrap().iter().all(|c| c["revision"].as_i64() == Some(r_alice)));
+
+    // Only administrators revert.
+    let (status, _) = env.call("POST", "/api/revert", Some(&alice), Some(json!({"revision": r_alice}))).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+
+    // Undoing just Bob's new child would leave the family pointing at nobody.
+    let (status, body) = env.call("POST", "/api/revert", Some(&admin), Some(json!({"revision": r_bob, "xref": "I99"}))).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("whole save"));
+    // The whole save is fine.
+    let (status, body) = env.call("POST", "/api/revert", Some(&admin), Some(json!({"revision": r_bob}))).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["undone"], 2);
+    let (_, text) = env.tree(&admin).await;
+    assert!(!text.contains("New /Child/") && !text.contains("@I99@"));
+
+    // Thomas was changed again after Alice's save: listed, then forced.
+    save(&bob, "NAME Tom /Hartwell/", "NAME Tommy /Hartwell/").await;
+    let (status, body) = env.call("POST", "/api/revert", Some(&admin), Some(json!({"revision": r_alice, "xref": "I1"}))).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["later"][0]["user"], "Bob");
+    let (status, _) = env.call("POST", "/api/revert", Some(&admin), Some(json!({"revision": r_alice, "xref": "I1", "force": true}))).await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, text) = env.tree(&admin).await;
+    assert!(text.contains("NAME Thomas /Hartwell/"));
+
+    // The revert is itself in the history, by the admin, saying what it was.
+    let (_, hist) = env.call("GET", "/api/changes?xref=I1", Some(&admin), None).await;
+    assert_eq!(hist[0]["user"], "Admin");
+    assert!(hist[0]["note"].as_str().unwrap().starts_with("Reverted Tommy Hartwell"), "{}", hist[0]);
+    env.done().await;
+}

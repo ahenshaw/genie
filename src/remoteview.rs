@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, channel};
 use egui::{Align, Layout, RichText, Ui};
 use elegance::{Accent, BadgeTone, Button, ButtonSize, Modal, Select, Switch, TextInput, Theme, Toast, glyphs};
 
-use crate::remote::{self, Account, Conflict, Remote, Role};
+use crate::remote::{self, Account, ChangeRow, Conflict, LaterEdit, Remote, ReportQuery, Role};
 use crate::widgets::{muted, section_label};
 
 /// What a dialog asks the app to do.
@@ -21,6 +21,10 @@ pub enum Request {
     /// Put a tree on the server: a `.ged` or `.gdz`, or the tree that was
     /// open before signing in. `replace`: over the tree already there.
     Seed { path: PathBuf, replace: bool },
+    /// Show this person.
+    Select(String),
+    /// Get the latest from the server (after a revert there).
+    Sync,
 }
 
 #[derive(Default)]
@@ -30,6 +34,53 @@ pub struct RemoteUi {
     password: Option<PasswordDialog>,
     accounts: Option<AccountsDialog>,
     seed: Option<SeedDialog>,
+    report: Option<ReportDialog>,
+    /// The accounts, for the report's filter as well as the Accounts dialog.
+    account_list: Vec<Account>,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Span {
+    Today,
+    Week,
+    Month,
+    All,
+    Custom,
+}
+
+struct ReportDialog {
+    open: bool,
+    span: Span,
+    from: String,
+    to: String,
+    /// "" for everyone.
+    username: String,
+    rows: Vec<ChangeRow>,
+    more: bool,
+    loading: bool,
+    confirm: Option<RevertPlan>,
+}
+
+/// A revert waiting to be confirmed.
+struct RevertPlan {
+    revision: i64,
+    xref: Option<String>,
+    what: String,
+    /// The server said later edits are in the way.
+    blocked: Option<(String, Vec<LaterEdit>)>,
+}
+
+impl ReportDialog {
+    fn query(&self) -> ReportQuery {
+        let (from, to) = match self.span {
+            Span::Today => (Some(remote::utc_day(0)), None),
+            Span::Week => (Some(remote::utc_day(6)), None),
+            Span::Month => (Some(remote::utc_day(29)), None),
+            Span::All => (None, None),
+            Span::Custom => (Some(self.from.trim().to_string()).filter(|s| !s.is_empty()), Some(self.to.trim().to_string()).filter(|s| !s.is_empty())),
+        };
+        ReportQuery { from, to, username: Some(self.username.clone()).filter(|u| !u.is_empty()) }
+    }
 }
 
 struct ConnectDialog {
@@ -129,7 +180,51 @@ impl RemoteUi {
 
     pub fn set_accounts(&mut self, list: Vec<Account>) {
         if let Some(a) = self.accounts.as_mut() {
-            a.accounts = list;
+            a.accounts = list.clone();
+        }
+        self.account_list = list;
+    }
+
+    pub fn open_report(&mut self, remote: &mut Remote, ctx: &egui::Context) {
+        let d = ReportDialog {
+            open: true,
+            span: Span::Week,
+            from: remote::utc_day(6),
+            to: remote::utc_day(0),
+            username: String::new(),
+            rows: Vec::new(),
+            more: false,
+            loading: true,
+            confirm: None,
+        };
+        remote.load_report(ctx, &d.query(), None);
+        remote.load_accounts(ctx);
+        self.report = Some(d);
+    }
+
+    pub fn report_rows(&mut self, rows: Vec<ChangeRow>, append: bool, more: bool) {
+        if let Some(d) = self.report.as_mut() {
+            if !append {
+                d.rows.clear();
+            }
+            d.rows.extend(rows);
+            d.more = more;
+            d.loading = false;
+        }
+    }
+
+    pub fn revert_blocked(&mut self, message: String, later: Vec<LaterEdit>) {
+        if let Some(plan) = self.report.as_mut().and_then(|d| d.confirm.as_mut()) {
+            plan.blocked = Some((message, later));
+        }
+    }
+
+    /// A revert went in: show the report again from the top.
+    pub fn reverted(&mut self, remote: &mut Remote, ctx: &egui::Context) {
+        if let Some(d) = self.report.as_mut() {
+            d.confirm = None;
+            d.loading = true;
+            remote.load_report(ctx, &d.query(), None);
         }
     }
 
@@ -145,6 +240,185 @@ impl RemoteUi {
             self.password_dialog(ctx, r);
             self.accounts_dialog(ctx, r);
             self.seed_dialog(ctx, r, requests);
+            self.report_dialog(ctx, r, requests);
+        }
+    }
+
+    fn report_dialog(&mut self, ctx: &egui::Context, remote: &mut Remote, requests: &mut Vec<Request>) {
+        let accounts: Vec<(String, String)> = self.account_list.iter().map(|a| (a.username.clone(), if a.display_name.is_empty() { a.username.clone() } else { a.display_name.clone() })).collect();
+        let Some(d) = self.report.as_mut() else { return };
+        let p = Theme::current(ctx).palette;
+        let mut reload = false;
+        let mut more = false;
+        let mut plan: Option<RevertPlan> = None;
+        let mut select = None;
+        Modal::new("edit_report", &mut d.open)
+            .heading("Edit history")
+            .subtitle(format!("Every change to the tree on {}, and who made it", remote.host()))
+            .header_icon(glyphs::KEY.to_string())
+            .max_width(860.0)
+            .show(ctx, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    let before = (d.span, d.username.clone());
+                    let mut i = [Span::Today, Span::Week, Span::Month, Span::All, Span::Custom].iter().position(|s| *s == d.span).unwrap_or(1);
+                    ui.add(elegance::SegmentedControl::new(&mut i, ["Today", "Last 7 days", "Last 30 days", "All", "Dates…"]).size(elegance::SegmentedSize::Small).id_salt("rep_span"));
+                    d.span = [Span::Today, Span::Week, Span::Month, Span::All, Span::Custom][i];
+                    ui.add_space(8.0);
+                    let mut options = vec![(String::new(), "Everyone".to_string())];
+                    options.extend(accounts.iter().cloned());
+                    ui.add(Select::new("rep_user", &mut d.username).options(options).width(170.0));
+                    reload |= before != (d.span, d.username.clone()) && d.span != Span::Custom;
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.add(Button::new(format!("{}  Copy as CSV", glyphs::COPY)).outline().size(ButtonSize::Small).enabled(!d.rows.is_empty())).clicked() {
+                            ui.ctx().copy_text(csv(&d.rows));
+                            Toast::new(format!("Copied {} changes", d.rows.len())).description("Paste them into a spreadsheet.").show(ui.ctx());
+                        }
+                    });
+                });
+                if d.span == Span::Custom {
+                    ui.horizontal(|ui| {
+                        ui.add(TextInput::new(&mut d.from).label("From").hint("YYYY-MM-DD").desired_width(130.0).id_salt("rep_from"));
+                        ui.add(TextInput::new(&mut d.to).label("To").hint("YYYY-MM-DD").desired_width(130.0).id_salt("rep_to"));
+                        if ui.add(Button::new("Show").size(ButtonSize::Small)).clicked() {
+                            reload = true;
+                        }
+                    });
+                }
+                ui.label(RichText::new("Dates and times are UTC.").size(11.5).color(p.text_faint));
+                ui.add_space(4.0);
+                egui::ScrollArea::vertical().max_height(440.0).auto_shrink([false, true]).show(ui, |ui| {
+                    if d.loading && d.rows.is_empty() {
+                        ui.spinner();
+                    } else if d.rows.is_empty() {
+                        muted(ui, "No changes in that span.");
+                    }
+                    let mut i = 0;
+                    while i < d.rows.len() {
+                        let rev = d.rows[i].revision;
+                        let group: Vec<&ChangeRow> = d.rows[i..].iter().take_while(|r| r.revision == rev).collect();
+                        i += group.len();
+                        let first = group[0];
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let who = first.user.as_deref().unwrap_or("someone");
+                            let n = group.len();
+                            ui.label(RichText::new(format!("{} · {who}", first.when())).strong().color(p.text));
+                            ui.label(RichText::new(format!("{n} change{}", if n == 1 { "" } else { "s" })).size(12.0).color(p.text_faint));
+                            if !first.note.is_empty() {
+                                ui.label(RichText::new(&first.note).size(12.0).color(p.amber));
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                if ui.add(Button::new("Revert this save").outline().size(ButtonSize::Small)).on_hover_text("Put everything it changed back as it was before").clicked() {
+                                    plan = Some(RevertPlan { revision: rev, xref: None, what: format!("{who}'s save of {} ({n} change{})", first.when(), if n == 1 { "" } else { "s" }), blocked: None });
+                                }
+                            });
+                        });
+                        for r in group {
+                            ui.horizontal(|ui| {
+                                ui.add_space(14.0);
+                                let (verb, color) = match r.action.as_str() {
+                                    "add" => ("Added", p.green),
+                                    "delete" => ("Deleted", p.red),
+                                    _ => ("Changed", p.text_muted),
+                                };
+                                ui.label(RichText::new(verb).size(12.5).color(color));
+                                let name = if r.label.is_empty() { r.xref.clone() } else { r.label.clone() };
+                                if r.tag == "INDI" && r.action != "delete" {
+                                    let link = ui.add(egui::Label::new(RichText::new(&name).size(13.0).color(p.focus)).sense(egui::Sense::click()));
+                                    if link.on_hover_text("Show this person").clicked() {
+                                        select = Some(r.xref.clone());
+                                    }
+                                } else {
+                                    ui.label(RichText::new(&name).size(13.0).color(p.text));
+                                }
+                                ui.label(RichText::new(format!("{} {}", kind_word(&r.tag), r.xref)).size(11.5).color(p.text_faint));
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.add(Button::new("Revert").outline().size(ButtonSize::Small)).on_hover_text("Put just this back as it was before this save").clicked() {
+                                        let what = match r.action.as_str() {
+                                            "add" => "addition of",
+                                            "delete" => "deletion of",
+                                            _ => "change to",
+                                        };
+                                        plan = Some(RevertPlan { revision: rev, xref: Some(r.xref.clone()), what: format!("{}'s {what} {name}", r.user.as_deref().unwrap_or("Someone")), blocked: None });
+                                    }
+                                });
+                            });
+                        }
+                        ui.separator();
+                    }
+                    if d.more && ui.add(Button::new("Load more").outline().size(ButtonSize::Small).enabled(!d.loading)).clicked() {
+                        more = true;
+                    }
+                });
+            });
+        if let Some(pl) = plan {
+            d.confirm = Some(pl);
+        }
+        if let Some(x) = select {
+            requests.push(Request::Select(x));
+            d.open = false;
+        }
+        if reload {
+            d.loading = true;
+            remote.load_report(ctx, &d.query(), None);
+        } else if more {
+            d.loading = true;
+            let before = d.rows.last().map(|r| r.revision);
+            remote.load_report(ctx, &d.query(), before);
+        }
+
+        // Confirming a revert.
+        let mut go = None;
+        let mut cancel = false;
+        if let Some(c) = d.confirm.as_ref() {
+            let mut open = true;
+            Modal::new("revert_confirm", &mut open)
+                .heading("Revert this?")
+                .subtitle(c.what.clone())
+                .header_icon(glyphs::TRIANGLE_ALERT.to_string())
+                .header_accent(Accent::Amber)
+                .max_width(480.0)
+                .show(ctx, |ui| {
+                    match &c.blocked {
+                        None => {
+                            muted(ui, "What it changed goes back to how it was just before. The revert is saved as a change of its own, so it can be reverted too.");
+                        }
+                        Some((message, later)) => {
+                            ui.label(RichText::new(message).color(p.amber));
+                            ui.add_space(4.0);
+                            for l in later.iter().take(12) {
+                                let at = l.at.get(..16).unwrap_or(&l.at).replace('T', " ");
+                                ui.label(RichText::new(format!("{} · {} · {at} UTC", l.label, l.user.as_deref().unwrap_or("someone"))).size(12.5).color(p.text_muted));
+                            }
+                            if later.len() > 12 {
+                                ui.label(RichText::new(format!("and {} more", later.len() - 12)).size(12.0).color(p.text_faint));
+                            }
+                        }
+                    }
+                    ui.add_space(10.0);
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let force = c.blocked.is_some();
+                        let label = if force { "Revert anyway" } else { "Revert" };
+                        if ui.add(Button::new(label).accent(Accent::Red)).clicked() {
+                            go = Some(force);
+                        }
+                        if ui.add(Button::new("Cancel").outline()).clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            cancel |= !open;
+        }
+        if let Some(force) = go
+            && let Some(c) = d.confirm.as_ref()
+        {
+            remote.revert(ctx, c.revision, c.xref.clone(), force);
+        }
+        if cancel {
+            d.confirm = None;
+        }
+        if !d.open {
+            self.report = None;
         }
     }
 
@@ -427,6 +701,45 @@ impl RemoteUi {
             self.seed = None;
         }
     }
+}
+
+fn kind_word(tag: &str) -> &'static str {
+    match tag {
+        "INDI" => "person",
+        "FAM" => "family",
+        "SOUR" => "source",
+        "OBJE" => "document",
+        "NOTE" => "note",
+        "REPO" => "repository",
+        _ => "record",
+    }
+}
+
+/// The report as CSV, one change per line.
+fn csv(rows: &[ChangeRow]) -> String {
+    let field = |s: &str| if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() };
+    let mut out = String::from("When (UTC),Who,Account,Action,What,Record,ID,Revision,Note\n");
+    for r in rows {
+        let when = r.at.replace('T', " ").trim_end_matches('Z').to_string();
+        let line = [
+            when,
+            r.user.clone().unwrap_or_default(),
+            r.username.clone().unwrap_or_default(),
+            r.action.clone(),
+            kind_word(&r.tag).to_string(),
+            r.label.clone(),
+            r.xref.clone(),
+            r.revision.to_string(),
+            r.note.clone(),
+        ]
+        .iter()
+        .map(|f| field(f))
+        .collect::<Vec<_>>()
+        .join(",");
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
 
 pub fn refresh_accounts(remote: &mut Remote, ctx: &egui::Context) {

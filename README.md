@@ -63,6 +63,15 @@ several people can build it together:
   - **Editors** can change the tree.
   - **Family** can see everyone but not change anything.
   - **Guests** see only people who have died; living people appear as "Private".
+- **Edit history:** administrators get *Tools → Edit history…*.
+  - It lists every change to the tree and who made it, grouped by save, for today, the
+    last 7 or 30 days, all time, or chosen dates, and for everyone or one person.
+  - *Copy as CSV* copies the list for a spreadsheet.
+  - *Revert* puts one record back as it was before that save, and *Revert this save*
+    puts back everything the save changed. A revert is recorded as a change of its own,
+    so it can be reverted too.
+  - Genie warns when the same records were changed again later, and won't leave links
+    pointing at records that no longer exist.
 - **Starting the shared tree:** an administrator uploads it from *Tools → Upload a tree
   to the server…*, which takes a `.gdz` bundle (with documents) or a `.ged` file.
 

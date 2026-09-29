@@ -34,7 +34,8 @@ which a page on another site can't add.
 | `POST /password` `{current, new}` | signed in | → a new token; other sessions end |
 | `GET /tree` | signed in | `{revision, role, gedcom}`: guests get the guest view. `If-None-Match: "rev-N"` → 304 |
 | `POST /tree` `{base_revision, gedcom, resolve?}` | editor | Others' changes since `base_revision` are merged in. Returns `{revision, merged, gedcom?, renamed, changes}`, or 409 `{conflicts: [{xref, kind, label, changed_by}]}`. Resubmit with `resolve: {"I12": "mine" \| "theirs"}`. |
-| `GET /changes?since=N` / `?xref=I12` | signed in | who changed what, newest first (guests: deceased records only) |
+| `GET /changes` | signed in | Who changed what, newest first, with each save's note. Filters: `since=N` / `before=N` (revisions), `xref=I12`, `from=` / `to=` (`YYYY-MM-DD`, UTC), `username=`, `limit=` (most 500). Guests see deceased records only. |
+| `POST /revert` `{revision, xref?, force?}` | admin | Puts back what that save changed (or just `xref`), as a new revision noted "Reverted …". A 409 lists later changes to the same records (resubmit with `force`), or refuses when links would be left pointing at deleted records. |
 | `GET /media` | signed in | `[{path, sha256, size}]` for documents the caller's view links to |
 | `GET /media/{sha256}` | signed in | the file, if the caller's view links to it; otherwise 404 |
 | `PUT /media?path=…` | editor | stores the body as the document at that path |

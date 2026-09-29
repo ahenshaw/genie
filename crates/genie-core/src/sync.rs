@@ -211,8 +211,33 @@ pub fn merge_resolving(base: &[Node], ours: &[Node], theirs: &[Node], resolve: i
     }
 }
 
+/// Undoes a saved change: every record `after` changed relative to `before`
+/// (or just `only`) is put back into `head` the way `before` had it, which
+/// means removing records that change added. Returns the new records and
+/// what was put back.
+pub fn revert(head: &[Node], before: &[Node], after: &[Node], only: Option<&str>) -> (Vec<Node>, Vec<Change>) {
+    let undone: Vec<Change> = diff(before, after).into_iter().filter(|c| only.is_none_or(|x| c.xref == x)).collect();
+    let old = keyed(before);
+    let mut records = head.to_vec();
+    for c in &undone {
+        let at = records.iter().position(|r| r.xref.as_deref() == Some(c.xref.as_str()));
+        match (old.get(c.xref.as_str()), at) {
+            (Some(was), Some(i)) => records[i] = (*was).clone(),
+            (Some(was), None) => {
+                let end = records.iter().rposition(|r| r.tag == "TRLR" && r.xref.is_none()).unwrap_or(records.len());
+                records.insert(end, (*was).clone());
+            }
+            (None, Some(i)) => {
+                records.remove(i);
+            }
+            (None, None) => {}
+        }
+    }
+    (records, undone)
+}
+
 /// (record, target) for every pointer in `records` to an xref that isn't there.
-fn dangling(records: &[Node]) -> Vec<(String, String)> {
+pub fn dangling(records: &[Node]) -> Vec<(String, String)> {
     let existing: HashSet<&str> = records.iter().filter_map(|r| r.xref.as_deref()).collect();
     let mut out = Vec::new();
     for r in records {
@@ -348,6 +373,33 @@ mod tests {
         let theirs = edit(BASE, "0 @I3@ INDI\n1 NAME Cy /Lee/\n", "");
         let err = merge(&recs(BASE), &ours, &theirs).unwrap_err();
         assert_eq!(err, [Conflict { xref: "F1".into(), tag: "FAM".into(), kind: ConflictKind::DanglingLink { target: "I3".into() } }]);
+    }
+
+    #[test]
+    fn reverting_puts_records_back_as_they_were() {
+        let base = recs(BASE);
+        // One save renames Ann and adds Dee; a later save renames Bob.
+        let saved = edit(BASE, "Ann /Lee/", "Anne /Lee/");
+        let saved = recs(&crate::gedcom::write(&saved).replace("0 TRLR", "0 @I4@ INDI\r\n1 NAME Dee /Lee/\r\n0 TRLR"));
+        let head = recs(&crate::gedcom::write(&saved).replace("Bob /Lee/", "Robert /Lee/"));
+
+        // Just Ann: back to "Ann", Dee and Robert untouched.
+        let (r, undone) = revert(&head, &base, &saved, Some("I1"));
+        assert_eq!(undone.len(), 1);
+        assert_eq!(get(&r, "I1").unwrap().child_value("NAME"), "Ann /Lee/");
+        assert!(get(&r, "I4").is_some());
+        assert_eq!(get(&r, "I2").unwrap().child_value("NAME"), "Robert /Lee/");
+
+        // The whole save: Dee goes too.
+        let (r, undone) = revert(&head, &base, &saved, None);
+        assert_eq!(undone.len(), 2);
+        assert!(get(&r, "I4").is_none());
+        assert_eq!(r.last().unwrap().tag, "TRLR");
+
+        // Undoing a deletion brings the record back.
+        let deleted = edit(BASE, "0 @I3@ INDI\n1 NAME Cy /Lee/\n", "");
+        let (r, _) = revert(&deleted, &base, &deleted, None);
+        assert_eq!(get(&r, "I3").unwrap().child_value("NAME"), "Cy /Lee/");
     }
 
     #[test]

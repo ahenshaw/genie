@@ -84,6 +84,8 @@ pub enum Action {
     SignOut,
     ChangePassword,
     Accounts,
+    /// Every change to the shared tree, with reverts (administrators).
+    EditHistory,
     /// Put a tree on the server (an administrator, when it has none).
     UploadTree,
     Close,
@@ -841,6 +843,17 @@ impl GenieApp {
                     ctx.forget_all_images();
                 }
                 remote::Event::SignedOut => {}
+                remote::Event::Report { rows, append, more } => self.remote_ui.report_rows(rows, append, more),
+                remote::Event::RevertBlocked { message, later } => self.remote_ui.revert_blocked(message, later),
+                remote::Event::Reverted { undone } => {
+                    Toast::new(format!("Reverted {undone} record{}", if undone == 1 { "" } else { "s" }))
+                        .tone(BadgeTone::Ok)
+                        .description("Saved as a change of its own; revert that to undo it.")
+                        .show(ctx);
+                    self.remote_ui.reverted(r, ctx);
+                    // Bring the reverted tree here.
+                    self.remote_requests.push(Request::Sync);
+                }
                 remote::Event::Failed(e) if e == remote::SIGNED_OUT => {
                     let (server, user) = (r.state.server.clone(), r.state.user.username.clone());
                     self.remote_ui.open_connect(&server, &user, Some(e));
@@ -856,6 +869,11 @@ impl GenieApp {
                 Request::Connected(r) => self.connected(ctx, r),
                 Request::Resolve(resolve) => self.sync(ctx, resolve),
                 Request::Seed { path, replace } => self.seed(ctx, path, replace),
+                Request::Select(x) => {
+                    self.select(x);
+                    self.tab = TAB_PROFILE;
+                }
+                Request::Sync => self.sync(ctx, HashMap::new()),
             }
         }
     }
@@ -1331,6 +1349,11 @@ impl GenieApp {
                         self.remote_ui.open_accounts(r, ctx);
                     }
                 }
+                Action::EditHistory => {
+                    if let Some(r) = self.remote.as_mut() {
+                        self.remote_ui.open_report(r, ctx);
+                    }
+                }
                 Action::UploadTree => {
                     let replace = self.remote.as_ref().is_some_and(|r| r.state.base_revision.is_some());
                     self.remote_ui.offer_seed(self.before_connect.clone(), replace);
@@ -1561,6 +1584,9 @@ impl GenieApp {
                     ui.separator();
                     if ui.add(MenuItem::new("Accounts…").icon(glyphs::KEY.to_string())).on_hover_text("Who can see and edit the shared tree").clicked() {
                         acts.push(Action::Accounts);
+                    }
+                    if ui.add(MenuItem::new("Edit history…")).on_hover_text("Every change, and who made it; revert any of them").clicked() {
+                        acts.push(Action::EditHistory);
                     }
                     // Needs files on this computer.
                     if !platform::WEB && ui.add(MenuItem::new("Upload a tree to the server…")).on_hover_text("Replace the shared tree with one from a file (kept in its history)").clicked() {
