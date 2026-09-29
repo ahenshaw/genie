@@ -1,0 +1,12 @@
+[Unit]
+Description=Copy genie.henshaw.us's backups to this computer, daily
+
+[Timer]
+# The VPS backs up at 03:17 UTC. Persistent: a day missed while this
+# computer was off or asleep is made up soon after it's back.
+OnCalendar=*-*-* 09:00
+Persistent=true
+RandomizedDelaySec=15min
+
+[Install]
+WantedBy=timers.target

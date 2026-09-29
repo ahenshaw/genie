@@ -125,7 +125,17 @@ Each run logs to syslog (`journalctl -t genie-backup`), and fails if the dump co
 empty. To run one now: `sudo genie-backup`. To restore the database:
 `gunzip -c genie-YYYY-MM-DD.sql.gz | mysql -u root -p genie`.
 
-These backups live on the same VPS, so copy them somewhere else as well.
+**Off-site copy.** The backups are readable by the `genie-backup` group; `install.sh`
+creates it and adds whoever runs it. A computer whose account is in that group can pull
+a copy over SSH. `deploy/offsite/install-offsite.sh`, run as yourself, sets that up:
+
+- a systemd user timer copies `/var/backups/genie` into `~/Backups/genie` every day at
+  09:00, catching up after the computer was off
+- files there are readable by you only, and are never deleted, so every day's dump is kept
+- a desktop notification warns when the newest copy is over three days old
+
+`systemctl --user list-timers genie-backup-pull.timer` shows when it runs next, and
+`journalctl --user -u genie-backup-pull` shows what it did.
 
 **Signing everyone out:** change `SESSION_SECRET` in `.env`
 (`openssl rand -hex 32`), then `systemctl restart genie-server`.

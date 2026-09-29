@@ -16,6 +16,9 @@ set -euo pipefail
 
 ENV_FILE=/opt/genie-server/.env
 DEST=/var/backups/genie
+# May read the backups (install.sh adds the deploying user), so another
+# computer can pull a copy over SSH without root. Nobody else can.
+GROUP=genie-backup
 MEDIA=/var/lib/genie/media
 KEEP_DAYS=30
 
@@ -34,7 +37,7 @@ db_host=${BASH_REMATCH[3]}
 db_port=${BASH_REMATCH[4]:-3306}
 db_name=${BASH_REMATCH[5]%%\?*}
 
-install -d -m 700 "$DEST" "$DEST/media"
+install -d -m 750 "$DEST" "$DEST/media"
 
 out="$DEST/genie-$(date -u +%F).sql.gz"
 tmp="$out.partial"
@@ -62,6 +65,14 @@ if [[ -d $MEDIA ]]; then
 fi
 
 find "$DEST" -maxdepth 1 -name 'genie-*.sql.gz' -mtime +"$KEEP_DAYS" -delete
+
+# Root writes; the group reads; nobody else gets in.
+if getent group "$GROUP" >/dev/null; then
+  chgrp -R "$GROUP" "$DEST"
+  chmod -R u=rwX,g=rX,o= "$DEST"
+else
+  chmod -R u=rwX,go= "$DEST"
+fi
 
 files=$(find "$DEST/media" -type f | wc -l)
 log "backed up $db_name to $out ($(du -h "$out" | cut -f1)); $files documents in $DEST/media"

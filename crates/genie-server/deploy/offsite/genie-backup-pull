@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+#
+# Pulls a copy of genie.henshaw.us's nightly backups to this computer, run
+# daily by the genie-backup-pull systemd user timer.
+#
+# Nothing is ever deleted here: the VPS keeps 30 days of dumps, this copy
+# keeps them all (a day's dump is small). If the newest copy is getting old,
+# a desktop notification says so.
+set -euo pipefail
+
+HOST="${GENIE_BACKUP_HOST:-tennis.henshaw.us}"
+SRC=/var/backups/genie/
+DEST="${GENIE_BACKUP_DIR:-$HOME/Backups/genie}"
+STALE_DAYS=3
+
+notify() {
+  command -v notify-send >/dev/null && notify-send -a Genie -u "$1" "Genie backups" "$2" || true
+}
+
+mkdir -p "$DEST"
+chmod 700 "$DEST"
+# Not -a: the VPS's owner and group mean nothing here (its group's number
+# can be some other group on this computer). Everything is yours alone.
+if ! rsync -rlt --partial --timeout=300 --chmod=D700,F600 -e "ssh -o BatchMode=yes -o ConnectTimeout=20" "$HOST:$SRC" "$DEST/"; then
+  echo "couldn't copy from $HOST:$SRC" >&2
+  newest=$(find "$DEST" -maxdepth 1 -name 'genie-*.sql.gz' -mtime -"$STALE_DAYS" | head -1)
+  [[ -n $newest ]] || notify critical "Couldn't copy the backups from $HOST, and the newest copy here is over $STALE_DAYS days old."
+  exit 1
+fi
+
+latest=$(ls -t "$DEST"/genie-*.sql.gz 2>/dev/null | head -1 || true)
+if [[ -z $latest ]]; then
+  notify critical "No database backups came from $HOST."
+  exit 1
+fi
+if [[ -n $(find "$latest" -mtime +"$STALE_DAYS") ]]; then
+  notify critical "The newest backup, $(basename "$latest"), is over $STALE_DAYS days old: check the nightly backup on $HOST (journalctl -t genie-backup)."
+fi
+echo "copied to $DEST: newest $(basename "$latest"), $(ls "$DEST"/genie-*.sql.gz | wc -l) dumps, $(find "$DEST/media" -type f 2>/dev/null | wc -l) documents"

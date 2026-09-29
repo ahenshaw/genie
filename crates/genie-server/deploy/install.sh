@@ -150,14 +150,16 @@ code=$(curl -s -o /dev/null -w '%{http_code}' "https://$SITE/" || true)
 echo "==> https://$SITE/ answers $code (200: the browser app)"
 
 echo "==> Nightly backups"
+# Readers of the backups, for an off-site copy pulled over SSH.
+groupadd -f --system genie-backup
+if [[ -n ${SUDO_USER:-} && $SUDO_USER != root ]] && ! id -nG "$SUDO_USER" | grep -qw genie-backup; then
+  usermod -aG genie-backup "$SUDO_USER"
+  echo "    $SUDO_USER can now read /var/backups/genie (from the next SSH login)"
+fi
 install -m 755 "$STAGE/genie-backup" /usr/local/sbin/genie-backup
 install -m 644 "$STAGE/genie-backup.cron" /etc/cron.d/genie-backup
-if ! ls /var/backups/genie/genie-*.sql.gz >/dev/null 2>&1; then
-  echo "    first backup now:"
-  /usr/local/sbin/genie-backup | sed 's/^/    /'
-else
-  echo "    last: $(ls -t /var/backups/genie/genie-*.sql.gz | head -1)"
-fi
+# A backup now: the first one, or to apply the group's access to earlier ones.
+/usr/local/sbin/genie-backup | sed 's/^/    /'
 
 users=$(mysql_admin -N genie -e "SELECT COUNT(*) FROM users" 2>/dev/null || echo "?")
 if [[ "$users" == 0 ]]; then
