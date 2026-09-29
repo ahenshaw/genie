@@ -252,12 +252,21 @@ impl RemoteUi {
         let mut more = false;
         let mut plan: Option<RevertPlan> = None;
         let mut select = None;
-        Modal::new("edit_report", &mut d.open)
-            .heading("Edit history")
-            .subtitle(format!("Every change to the tree on {}, and who made it", remote.host()))
-            .header_icon(glyphs::KEY.to_string())
-            .max_width(860.0)
+        // A window rather than a modal: it can be made as big as the screen,
+        // egui remembers its size and place between runs, and the app stays
+        // usable beside it.
+        let screen = ctx.content_rect().size();
+        egui::Window::new("Edit history")
+            .id(egui::Id::new("edit_report_window"))
+            .open(&mut d.open)
+            .collapsible(false)
+            .resizable(true)
+            .default_size([900.0_f32.min(screen.x - 40.0), 680.0_f32.min(screen.y - 80.0)])
+            .min_size([520.0, 320.0])
+            .default_pos(egui::pos2((screen.x - 900.0).max(40.0) / 2.0, 60.0))
             .show(ctx, |ui| {
+                ui.label(RichText::new(format!("Every change to the tree on {}, and who made it", remote.host())).color(p.text_muted));
+                ui.add_space(4.0);
                 ui.horizontal_wrapped(|ui| {
                     let before = (d.span, d.username.clone());
                     let mut i = [Span::Today, Span::Week, Span::Month, Span::All, Span::Custom].iter().position(|s| *s == d.span).unwrap_or(1);
@@ -286,7 +295,8 @@ impl RemoteUi {
                 }
                 ui.label(RichText::new("Dates and times are UTC.").size(11.5).color(p.text_faint));
                 ui.add_space(4.0);
-                egui::ScrollArea::vertical().max_height(440.0).auto_shrink([false, true]).show(ui, |ui| {
+                // The list takes whatever height the window has.
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
                     if d.loading && d.rows.is_empty() {
                         ui.spinner();
                     } else if d.rows.is_empty() {
