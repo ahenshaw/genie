@@ -116,6 +116,56 @@ pub struct PersonForm {
     pub occupation: String,
     pub note: String,
     pub citations: Vec<CitationForm>,
+    /// Events besides birth, death and occupation (which have fields of
+    /// their own): residences, census, emigration, burial, ….
+    pub events: Vec<EventForm>,
+    /// The person's marriages, one per family they're a partner in.
+    pub marriages: Vec<MarriageForm>,
+}
+
+/// One of a person's events, as the editor shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct EventForm {
+    /// Which event of the record this is, as (tag, n) when the form was
+    /// made; `None` for one being added.
+    pub origin: Option<FactKey>,
+    pub tag: String,
+    pub date: String,
+    pub place: String,
+    /// What it was: the event's own text (a school, a regiment), or for a
+    /// generic `EVEN` its type ("Military service").
+    pub detail: String,
+}
+
+/// A marriage: the family's `MARR` date and place.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MarriageForm {
+    pub family: String,
+    /// Who to, for the editor's label.
+    pub spouse: String,
+    pub date: String,
+    pub place: String,
+}
+
+/// Events a person can be given in the editor, in the order its menu offers them.
+pub const PERSON_EVENTS: [&str; 26] = [
+    "RESI", "CENS", "EMIG", "IMMI", "NATU", "EDUC", "GRAD", "RETI", "CHR", "BAPM", "CHRA", "CONF", "FCOM", "BARM", "BASM", "BLES",
+    "ORDN", "ADOP", "BURI", "CREM", "PROB", "WILL", "RELI", "TITL", "PROP", "EVEN",
+];
+
+/// Events that have their own fields in the editor, not the events list.
+fn has_own_field(tag: &str) -> bool {
+    matches!(tag, "BIRT" | "DEAT" | "OCCU")
+}
+
+fn event_detail(n: &Node) -> String {
+    if n.tag == "EVEN" {
+        n.child_value("TYPE").to_string()
+    } else if n.value == "Y" || n.pointer().is_some() {
+        String::new()
+    } else {
+        n.value.clone()
+    }
 }
 
 /// Which fact a citation supports: a tag (`""` for the person as a whole)
@@ -685,6 +735,39 @@ impl Document {
                 .map(|n| n.value.clone())
                 .unwrap_or_default(),
             citations: read_citations(r),
+            events: {
+                let mut seen: HashMap<&str, usize> = HashMap::new();
+                r.children
+                    .iter()
+                    .filter_map(|c| {
+                        let n = seen.entry(c.tag.as_str()).or_default();
+                        let key = (c.tag.clone(), *n);
+                        *n += 1;
+                        (event_label(&c.tag).is_some() && !has_own_field(&c.tag)).then(|| EventForm {
+                            origin: Some(key),
+                            tag: c.tag.clone(),
+                            date: c.child_value("DATE").to_string(),
+                            place: c.child_value("PLAC").to_string(),
+                            detail: event_detail(c),
+                        })
+                    })
+                    .collect()
+            },
+            marriages: self
+                .spouse_families(xref)
+                .into_iter()
+                .filter_map(|f| {
+                    let fam = self.record(&f)?;
+                    let spouse = self.spouse_in(&f, xref).and_then(|s| self.person(&s).map(|p| p.display.clone())).unwrap_or_else(|| "unknown partner".into());
+                    let marr = fam.child("MARR");
+                    Some(MarriageForm {
+                        family: f,
+                        spouse,
+                        date: marr.map(|m| m.child_value("DATE").to_string()).unwrap_or_default(),
+                        place: marr.map(|m| m.child_value("PLAC").to_string()).unwrap_or_default(),
+                    })
+                })
+                .collect(),
         }
     }
 
@@ -798,6 +881,10 @@ impl Document {
                 write_citation(r, c, pointer);
             }
         }
+        // Events after citations, which were written against the events as
+        // they were. Only what changed is touched, so an edit elsewhere
+        // doesn't rewrite every date.
+        apply_events(r, &form.events);
         // Lines that were already there keep their place; new ones go where
         // GEDCOM convention puts them (names first, family links last).
         let family_links = original_order.iter().position(|(t, _)| t == "FAMC" || t == "FAMS").unwrap_or(original_order.len());
@@ -820,6 +907,16 @@ impl Document {
             .collect();
         order.sort_by(|a, b| a.0.total_cmp(&b.0));
         r.children = order.into_iter().map(|(_, n)| n).collect();
+
+        // Marriages live on the families.
+        for m in &form.marriages {
+            let Some(fam) = self.record_mut(&m.family) else { continue };
+            let marr = fam.child("MARR");
+            let (date, place) = (marr.map(|n| n.child_value("DATE")).unwrap_or(""), marr.map(|n| n.child_value("PLAC")).unwrap_or(""));
+            if normalize_date(date) != normalize_date(&m.date) || place.trim() != m.place.trim() {
+                set_event(fam, "MARR", &normalize_date(&m.date), &m.place, false);
+            }
+        }
     }
 
     pub fn create_source(&mut self, title: &str, author: &str, publication: &str) -> String {
@@ -1108,6 +1205,72 @@ fn strip_pointers(n: &mut Node, p: &str) {
     for c in &mut n.children {
         strip_pointers(c, p);
     }
+}
+
+/// Brings the record's editable events in line with `events`: changed ones
+/// updated in place (keeping their sources and anything else under them),
+/// removed ones dropped, new ones added.
+fn apply_events(r: &mut Node, events: &[EventForm]) {
+    // Where each existing event is, by its (tag, n).
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut at: HashMap<FactKey, usize> = HashMap::new();
+    for (i, c) in r.children.iter().enumerate() {
+        let n = seen.entry(c.tag.clone()).or_default();
+        if event_label(&c.tag).is_some() && !has_own_field(&c.tag) {
+            at.insert((c.tag.clone(), *n), i);
+        }
+        *n += 1;
+    }
+    let kept: std::collections::HashSet<&FactKey> = events.iter().filter_map(|e| e.origin.as_ref()).collect();
+    let mut remove: Vec<usize> = at.iter().filter(|(k, _)| !kept.contains(k)).map(|(_, &i)| i).collect();
+    for e in events {
+        let Some(i) = e.origin.as_ref().and_then(|k| at.get(k)).copied() else { continue };
+        let node = &mut r.children[i];
+        let unchanged = node.tag == e.tag
+            && normalize_date(node.child_value("DATE")) == normalize_date(&e.date)
+            && node.child_value("PLAC").trim() == e.place.trim()
+            && event_detail(node).trim() == e.detail.trim();
+        if unchanged {
+            continue;
+        }
+        node.tag = e.tag.clone();
+        write_event(node, e);
+    }
+    remove.sort_unstable();
+    for i in remove.into_iter().rev() {
+        r.children.remove(i);
+    }
+    for e in events.iter().filter(|e| e.origin.is_none()) {
+        if e.tag.is_empty() || e.date.trim().is_empty() && e.place.trim().is_empty() && e.detail.trim().is_empty() {
+            continue;
+        }
+        let mut node = Node::new(e.tag.clone(), "");
+        write_event(&mut node, e);
+        r.children.push(node);
+    }
+}
+
+fn write_event(node: &mut Node, e: &EventForm) {
+    node.set_child_value("DATE", &normalize_date(&e.date));
+    node.set_child_value("PLAC", &e.place);
+    if node.tag == "EVEN" {
+        node.set_child_value("TYPE", &e.detail);
+        if node.value == "Y" {
+            node.value.clear();
+        }
+    } else {
+        node.value = e.detail.trim().to_string();
+    }
+    // With nothing else to say, "Y" records that it happened.
+    if node.value.is_empty() && node.children.is_empty() {
+        node.value = "Y".into();
+    }
+    node.children.sort_by_key(|c| match c.tag.as_str() {
+        "TYPE" => 0,
+        "DATE" => 1,
+        "PLAC" => 2,
+        _ => 3,
+    });
 }
 
 fn set_event(r: &mut Node, tag: &str, date: &str, place: &str, keep_empty: bool) {
@@ -1471,6 +1634,41 @@ pub fn normalize_date(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn events_and_marriages_are_edited_in_place() {
+        let text = "0 HEAD\n0 @I1@ INDI\n1 NAME Eugene /Henshaw/\n1 BIRT\n2 DATE 2 JUN 1866\n\
+1 RESI\n2 DATE 1900\n2 PLAC Bermuda, Chesterfield, Virginia\n2 SOUR @S1@\n3 PAGE 1900 census\n\
+1 CENS\n2 DATE 1910\n1 RESI\n2 DATE 26 February 1920\n2 PLAC Midlothian\n1 FAMS @F1@\n1 FAMS @F2@\n\
+0 @I3@ INDI\n1 NAME Laura /Bohannon/\n1 FAMS @F2@\n\
+0 @F1@ FAM\n1 HUSB @I1@\n1 MARR\n2 DATE 26 February 1889\n0 @F2@ FAM\n1 HUSB @I1@\n1 WIFE @I3@\n0 @S1@ SOUR\n1 TITL Census\n0 TRLR\n";
+        let (mut doc, _) = Document::from_bytes(text.as_bytes());
+        let mut form = doc.form_for("I1");
+        let tags: Vec<&str> = form.events.iter().map(|e| e.tag.as_str()).collect();
+        assert_eq!(tags, ["RESI", "CENS", "RESI"]);
+        assert_eq!(form.marriages.iter().map(|m| m.spouse.as_str()).collect::<Vec<_>>(), ["unknown partner", "Laura Bohannon"]);
+
+        // Move the first residence, drop the census, add an emigration,
+        // and date the second marriage; leave the 1920 residence alone.
+        form.events[0].place = "Richmond, Virginia".into();
+        form.events.remove(1);
+        form.events.push(EventForm { origin: None, tag: "EMIG".into(), date: "1885".into(), place: "Liverpool".into(), detail: String::new() });
+        form.marriages[1].date = "about 1925".into();
+        doc.mutate(|d| d.apply_form("I1", &form));
+
+        let r = doc.record("I1").unwrap();
+        let resi: Vec<&Node> = r.children_with("RESI").collect();
+        assert_eq!(resi[0].child_value("PLAC"), "Richmond, Virginia");
+        // Its source came along.
+        assert_eq!(resi[0].child("SOUR").unwrap().child_value("PAGE"), "1900 census");
+        // Untouched: not even its date rewritten.
+        assert_eq!(resi[1].child_value("DATE"), "26 February 1920");
+        assert!(r.child("CENS").is_none());
+        assert_eq!(r.child("EMIG").unwrap().child_value("PLAC"), "Liverpool");
+        assert_eq!(doc.family_event("F2", "MARR").unwrap().0, "ABT 1925");
+        // The first marriage wasn't touched.
+        assert_eq!(doc.family_event("F1", "MARR").unwrap().0, "26 February 1889");
+    }
 
     #[test]
     fn a_marriage_without_details_still_shows_on_the_timeline() {

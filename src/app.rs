@@ -952,6 +952,12 @@ impl GenieApp {
         let mut form = doc.form_for(&xref);
         form.birth_date = model::pretty_date(&form.birth_date);
         form.death_date = model::pretty_date(&form.death_date);
+        for e in &mut form.events {
+            e.date = model::pretty_date(&e.date);
+        }
+        for m in &mut form.marriages {
+            m.date = model::pretty_date(&m.date);
+        }
         self.editor = Some(Editor {
             open: true,
             mode: EditMode::Existing(xref.clone()),
@@ -2077,9 +2083,71 @@ fn person_form(ui: &mut Ui, form: &mut PersonForm, focus: &mut bool, places: &[(
     }
 
     ui.add_space(6.0);
+    events_editor(ui, &mut form.events, places);
+    if !form.marriages.is_empty() {
+        ui.add_space(6.0);
+        section_label(ui, if form.marriages.len() == 1 { "Marriage" } else { "Marriages" });
+        for (i, m) in form.marriages.iter_mut().enumerate() {
+            ui.label(RichText::new(format!("With {}", m.spouse)).size(13.0).color(p.text));
+            date_input(ui, &mut m.date, &format!("f_mdate_{i}"));
+            place_input(ui, &mut m.place, &format!("f_mplace_{i}"), places);
+            ui.add_space(4.0);
+        }
+    }
+
+    ui.add_space(6.0);
     section_label(ui, "More");
     ui.add(TextInput::new(&mut form.occupation).label("Occupation").id_salt("f_occu"));
     ui.add(TextArea::new(&mut form.note).label("Notes").rows(4).id_salt("f_note"));
+}
+
+/// Events besides birth and death: each with its type, date, place and
+/// what it was, removable; and a button to add another.
+fn events_editor(ui: &mut Ui, events: &mut Vec<model::EventForm>, places: &[(String, usize)]) {
+    let p = Theme::current(ui.ctx()).palette;
+    ui.horizontal(|ui| {
+        section_label(ui, "Events");
+        if !events.is_empty() {
+            ui.label(RichText::new(format!("· {}", events.len())).size(11.0).color(p.text_faint));
+        }
+    });
+    let label = |t: &str| model::event_label(t).unwrap_or(t).to_string();
+    let mut remove = None;
+    for (i, e) in events.iter_mut().enumerate() {
+        Frame::new()
+            .fill(p.input_bg)
+            .stroke(egui::Stroke::new(1.0, p.border))
+            .corner_radius(8)
+            .inner_margin(Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.spacing_mut().item_spacing.y = 6.0;
+                ui.horizontal(|ui| {
+                    let mut options: Vec<(String, String)> = model::PERSON_EVENTS.iter().map(|t| (t.to_string(), label(t))).collect();
+                    if !model::PERSON_EVENTS.contains(&e.tag.as_str()) {
+                        options.insert(0, (e.tag.clone(), label(&e.tag)));
+                    }
+                    ui.add(Select::new(("ev_tag", i), &mut e.tag).options(options).width(200.0));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let del = ui.add(Button::new(glyphs::TRASH.to_string()).outline().size(ButtonSize::Small));
+                        if del.on_hover_text("Remove this event, with its sources").clicked() {
+                            remove = Some(i);
+                        }
+                    });
+                });
+                date_input(ui, &mut e.date, &format!("ev_date_{i}"));
+                place_input(ui, &mut e.place, &format!("ev_place_{i}"), places);
+                let (what, hint) = if e.tag == "EVEN" { ("What happened", "e.g. Military service") } else { ("Details", "e.g. a school, a ship, a regiment") };
+                ui.add(TextInput::new(&mut e.detail).label(what).hint(hint).id_salt(("ev_detail", i)));
+            });
+    }
+    if let Some(i) = remove {
+        events.remove(i);
+    }
+    let add = ui.add(Button::new(format!("{}  Add event", glyphs::PLUS)).outline().size(ButtonSize::Small));
+    if add.on_hover_text("A residence, census, emigration, burial, …").clicked() {
+        events.push(model::EventForm { tag: "RESI".into(), ..Default::default() });
+    }
 }
 
 fn date_input(ui: &mut Ui, value: &mut String, id: &str) {
