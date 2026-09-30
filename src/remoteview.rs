@@ -120,6 +120,8 @@ struct AccountsDialog {
     new_password: String,
     new_role: Role,
     reset: HashMap<i32, String>,
+    /// The account whose display name is being edited, and the new name.
+    renaming: Option<(i32, String)>,
     error: Option<String>,
 }
 
@@ -169,6 +171,7 @@ impl RemoteUi {
             new_password: String::new(),
             new_role: Role::Family,
             reset: HashMap::new(),
+            renaming: None,
             error: None,
         });
         refresh_accounts(remote, ctx);
@@ -600,6 +603,7 @@ impl RemoteUi {
         let me = remote.state.user.id;
         let mut changes: Vec<(i32, serde_json::Value, &'static str)> = Vec::new();
         let mut create = false;
+        let (mut start_rename, mut end_rename) = (None, false);
         Modal::new("accounts", &mut d.open)
             .heading("Accounts")
             .subtitle(format!("Who can see and edit the tree on {}", remote.host()))
@@ -614,8 +618,32 @@ impl RemoteUi {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.set_width(200.0);
-                                let name = if a.display_name.is_empty() { a.username.clone() } else { format!("{} ({})", a.display_name, a.username) };
-                                ui.label(RichText::new(name).strong().color(if a.disabled { p.text_faint } else { p.text }));
+                                match &mut d.renaming {
+                                    Some((id, text)) if *id == a.id => {
+                                        let resp = ui.add(TextInput::new(text).hint(a.username.as_str()).desired_width(190.0).compact(true).id_salt(("acct_name", a.id)));
+                                        if !resp.has_focus() && !resp.lost_focus() {
+                                            resp.request_focus();
+                                        }
+                                        let (enter, escape) = ui.input(|i| (i.key_pressed(egui::Key::Enter), i.key_pressed(egui::Key::Escape)));
+                                        if resp.lost_focus() && enter {
+                                            if text.trim() != a.display_name {
+                                                changes.push((a.id, serde_json::json!({ "display_name": text.trim() }), "Name changed."));
+                                            }
+                                            end_rename = true;
+                                        } else if escape || resp.lost_focus() {
+                                            end_rename = true;
+                                        }
+                                    }
+                                    _ => {
+                                        ui.horizontal(|ui| {
+                                            let name = if a.display_name.is_empty() { a.username.clone() } else { format!("{} ({})", a.display_name, a.username) };
+                                            ui.label(RichText::new(name).strong().color(if a.disabled { p.text_faint } else { p.text }));
+                                            if ui.add(Button::new(glyphs::PENCIL.to_string()).size(ButtonSize::Small).outline()).on_hover_text("Change the name shown on their edits").clicked() {
+                                                start_rename = Some((a.id, a.display_name.clone()));
+                                            }
+                                        });
+                                    }
+                                }
                                 let seen = a.last_login_at.as_deref().map(|t| format!("Last signed in {}", t.get(..10).unwrap_or(t))).unwrap_or_else(|| "Never signed in".into());
                                 ui.label(RichText::new(seen).size(11.5).color(p.text_faint));
                             });
@@ -656,6 +684,12 @@ impl RemoteUi {
                     ui.label(RichText::new(e).color(p.red));
                 }
             });
+        if end_rename {
+            d.renaming = None;
+        }
+        if start_rename.is_some() {
+            d.renaming = start_rename;
+        }
         for (id, change, done) in changes {
             remote.update_account(ctx, id, change, done.into());
         }
