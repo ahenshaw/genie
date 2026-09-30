@@ -793,7 +793,15 @@ impl GenieApp {
                 remote::Event::History { xref, rows } => {
                     r.history.insert(xref, rows);
                 }
-                remote::Event::Accounts(list) => self.remote_ui.set_accounts(list),
+                remote::Event::Accounts(list) => {
+                    // A renamed account: show the new name everywhere, including your own.
+                    if let Some(me) = list.iter().find(|a| a.id == r.state.user.id) && me.display_name != r.state.user.display_name {
+                        r.state.user.display_name = me.display_name.clone();
+                        let _ = r.save_state();
+                    }
+                    r.history.clear();
+                    self.remote_ui.set_accounts(list);
+                }
                 remote::Event::Done(msg) => {
                     Toast::new(msg).tone(BadgeTone::Ok).show(ctx);
                     if self.remote_ui.accounts_open() {

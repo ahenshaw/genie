@@ -620,7 +620,7 @@ impl RemoteUi {
                                 ui.set_width(200.0);
                                 match &mut d.renaming {
                                     Some((id, text)) if *id == a.id => {
-                                        let resp = ui.add(TextInput::new(text).hint(a.username.as_str()).desired_width(190.0).compact(true).id_salt(("acct_name", a.id)));
+                                        let resp = ui.add(TextInput::new(text).hint("Display name, e.g. Andy Henshaw").desired_width(190.0).compact(true).id_salt(("acct_name", a.id)));
                                         if !resp.has_focus() && !resp.lost_focus() {
                                             resp.request_focus();
                                         }
@@ -636,15 +636,20 @@ impl RemoteUi {
                                     }
                                     _ => {
                                         ui.horizontal(|ui| {
-                                            let name = if a.display_name.is_empty() { a.username.clone() } else { format!("{} ({})", a.display_name, a.username) };
-                                            ui.label(RichText::new(name).strong().color(if a.disabled { p.text_faint } else { p.text }));
-                                            if ui.add(Button::new(glyphs::PENCIL.to_string()).size(ButtonSize::Small).outline()).on_hover_text("Change the name shown on their edits").clicked() {
+                                            let color = if a.disabled { p.text_faint } else { p.text };
+                                            if a.display_name.is_empty() {
+                                                ui.label(RichText::new("No display name").italics().color(p.text_faint));
+                                            } else {
+                                                ui.label(RichText::new(&a.display_name).strong().color(color));
+                                            }
+                                            if ui.add(Button::new(glyphs::PENCIL.to_string()).size(ButtonSize::Small).outline()).on_hover_text("Change the display name shown on their edits (not the username they sign in with)").clicked() {
                                                 start_rename = Some((a.id, a.display_name.clone()));
                                             }
                                         });
                                     }
                                 }
                                 let seen = a.last_login_at.as_deref().map(|t| format!("Last signed in {}", t.get(..10).unwrap_or(t))).unwrap_or_else(|| "Never signed in".into());
+                                let seen = format!("Signs in as {} · {seen}", a.username);
                                 ui.label(RichText::new(seen).size(11.5).color(p.text_faint));
                             });
                             let mut role = Role::parse(&a.role).unwrap_or(Role::Guest);
