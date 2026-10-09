@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use egui::{Align, Frame, Key, KeyboardShortcut, Layout, Margin, Modifiers, RichText, Ui};
 use elegance::{
-    Accent, BadgeTone, BuiltInTheme, Button, ButtonSize, Drawer, DrawerSide, FileDropZone, MenuBar, MenuItem,
+    Accent, BadgeTone, BuiltInTheme, Button, ButtonSize, Callout, CalloutTone, Drawer, DrawerSide, FileDropZone, MenuBar, MenuItem,
     MenuSection, Modal, SegmentedControl, Select, SegmentedSize, SubMenuItem, Switch, TabBar, TextArea, TextInput, Theme,
     Toast, Toasts, glyphs,
 };
@@ -13,6 +13,7 @@ use elegance::{
 use crate::graph::{FamilyGraph, LinkMode};
 use crate::model::{self, CitationForm, CiteSource, Document, FactKey, PersonForm, Relation, Sex};
 use crate::mediaview::MediaUi;
+use crate::news;
 use crate::platform::{self, ServerEvent};
 use crate::relation::RelationView;
 use crate::remote::{self, Busy, Remote};
@@ -188,6 +189,9 @@ pub struct GenieApp {
     unsaved_open: bool,
     about_open: bool,
     shortcuts_open: bool,
+    news_open: bool,
+    /// The newest what's-new entry this person has dismissed.
+    news_seen: u32,
     load_notes: Vec<String>,
     allow_close: bool,
     title: String,
@@ -242,6 +246,8 @@ impl GenieApp {
             unsaved_open: false,
             about_open: false,
             shortcuts_open: false,
+            news_open: false,
+            news_seen: 0,
             load_notes: Vec::new(),
             allow_close: false,
             title: String::new(),
@@ -283,6 +289,7 @@ impl GenieApp {
             last_open = storage.get_string("last_open").filter(|p| !p.is_empty()).map(PathBuf::from);
             app.last_server = storage.get_string("last_server").unwrap_or_default();
             app.last_username = storage.get_string("last_username").unwrap_or_default();
+            app.news_seen = storage.get_string("news_seen").and_then(|n| n.parse().ok()).unwrap_or(0);
         }
         app.theme.theme().install(&cc.egui_ctx);
         crate::fonts::install(&cc.egui_ctx);
@@ -1455,7 +1462,7 @@ impl GenieApp {
         let recent = self.recent.clone();
         let selected = self.selected.clone();
         let mut theme = self.theme;
-        let (mut focus_search, mut shortcuts_open, mut about_open) = (false, false, false);
+        let (mut focus_search, mut shortcuts_open, mut about_open, mut news_open) = (false, false, false, false);
         bar.show(ui, |bar| {
             bar.menu("File", |ui| {
                 if let (true, Some((_, busy))) = (platform::WEB, connected) {
@@ -1637,6 +1644,9 @@ impl GenieApp {
                 }
             });
             bar.menu("Help", |ui| {
+                if ui.add(MenuItem::new("What's new")).clicked() {
+                    news_open = true;
+                }
                 if ui.add(MenuItem::new("Keyboard shortcuts")).clicked() {
                     shortcuts_open = true;
                 }
@@ -1649,6 +1659,37 @@ impl GenieApp {
         self.focus_search |= focus_search;
         self.shortcuts_open |= shortcuts_open;
         self.about_open |= about_open;
+        if news_open {
+            self.news_open = true;
+            self.news_seen = news::latest();
+        }
+    }
+
+    /// A banner for what's new since this person last looked, until they
+    /// dismiss it or open the list.
+    fn news_banner(&mut self, ui: &mut Ui) {
+        let unseen = news::unseen(self.news_seen);
+        let Some(first) = unseen.first() else { return };
+        let p = Theme::current(ui.ctx()).palette;
+        let mut open = true;
+        let mut see_all = false;
+        egui::Panel::top("news")
+            .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 0 }))
+            .show(ui, |ui| {
+                let title = match unseen.len() {
+                    1 => format!("New: {}", first.title),
+                    n => format!("New: {}, and {} more", first.title, n - 1),
+                };
+                Callout::new(CalloutTone::Info).title(title).body(first.body).multiline().dismissable(&mut open).show(ui, |ui| {
+                    see_all = unseen.len() > 1 && ui.add(Button::new("See all").outline().size(ButtonSize::Small)).clicked();
+                });
+            });
+        if see_all {
+            self.news_open = true;
+        }
+        if !open || see_all {
+            self.news_seen = news::latest();
+        }
     }
 
     fn toolbar(&mut self, ui: &mut Ui) {
@@ -1907,6 +1948,20 @@ impl GenieApp {
             widgets::muted(ui, "Load, build, explore and save family trees as GEDCOM 5.5.1. Unknown tags are preserved when you save.");
             ui.add_space(6.0);
             widgets::muted(ui, "Built with egui, egui-elegance and nodez.");
+        });
+
+        Modal::new("news", &mut self.news_open).heading("What's new").max_width(crate::widgets::fit_width(ctx, 480.0)).show(ctx, |ui| {
+            let p = Theme::current(ui.ctx()).palette;
+            for (i, n) in news::NEWS.iter().enumerate() {
+                if i > 0 {
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(6.0);
+                }
+                ui.label(RichText::new(n.date).size(11.0).color(p.text_faint));
+                ui.label(RichText::new(n.title).strong().color(p.text));
+                widgets::muted(ui, n.body);
+            }
         });
 
         Modal::new("shortcuts", &mut self.shortcuts_open).heading("Keyboard shortcuts").max_width(crate::widgets::fit_width(ctx, 460.0)).show(ctx, |ui| {
@@ -2295,6 +2350,7 @@ impl eframe::App for GenieApp {
             egui::Panel::top("toolbar")
                 .frame(Frame::new().fill(p.bg).inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 0 }))
                 .show(ui, |ui| self.toolbar(ui));
+            self.news_banner(ui);
 
             let mut doc = self.doc.take().expect("checked above");
             // Menus anywhere offer relationships to these two.
@@ -2395,6 +2451,7 @@ impl eframe::App for GenieApp {
         storage.set_string("last_open", last_open.map(|p| p.display().to_string()).unwrap_or_default());
         storage.set_string("last_server", self.last_server.clone());
         storage.set_string("last_username", self.last_username.clone());
+        storage.set_string("news_seen", self.news_seen.to_string());
     }
 }
 

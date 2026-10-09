@@ -6,6 +6,7 @@ mod graph;
 mod homepath;
 mod mediaview;
 mod minimap;
+mod news;
 mod platform;
 mod relation;
 mod remote;
