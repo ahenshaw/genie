@@ -965,6 +965,7 @@ impl GenieApp {
         }
         for m in &mut form.marriages {
             m.date = model::pretty_date(&m.date);
+            m.divorce_date = model::pretty_date(&m.divorce_date);
         }
         self.editor = Some(Editor {
             open: true,
@@ -1042,6 +1043,12 @@ impl GenieApp {
         if !form.deceased {
             form.death_date.clear();
             form.death_place.clear();
+        }
+        for m in &mut form.marriages {
+            if !m.divorced {
+                m.divorce_date.clear();
+                m.divorce_place.clear();
+            }
         }
         let mode = ed.mode.clone();
         let creating_or_editing = !(matches!(mode, EditMode::New(Some(_))) && ed.source == 1);
@@ -2096,9 +2103,22 @@ fn person_form(ui: &mut Ui, form: &mut PersonForm, focus: &mut bool, places: &[(
         ui.add_space(6.0);
         section_label(ui, if form.marriages.len() == 1 { "Marriage" } else { "Marriages" });
         for (i, m) in form.marriages.iter_mut().enumerate() {
-            ui.label(RichText::new(format!("With {}", m.spouse)).size(13.0).color(p.text));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("With {}", m.spouse)).size(13.0).color(p.text));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.push_id(("f_div", i), |ui| ui.add(Switch::new(&mut m.divorced, "Divorced")));
+                });
+            });
             date_input(ui, &mut m.date, &format!("f_mdate_{i}"));
             place_input(ui, &mut m.place, &format!("f_mplace_{i}"), places);
+            if !m.divorced && (!m.divorce_date.is_empty() || !m.divorce_place.is_empty()) {
+                m.divorced = true;
+            }
+            if m.divorced {
+                ui.label(RichText::new("Divorce").size(12.0).color(p.text_muted));
+                date_input(ui, &mut m.divorce_date, &format!("f_divdate_{i}"));
+                place_input(ui, &mut m.divorce_place, &format!("f_divplace_{i}"), places);
+            }
             ui.add_space(4.0);
         }
     }

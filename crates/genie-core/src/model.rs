@@ -137,7 +137,8 @@ pub struct EventForm {
     pub detail: String,
 }
 
-/// A marriage: the family's `MARR` date and place.
+/// A marriage: the family's `MARR` date and place, and its `DIV` if it
+/// ended in divorce.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MarriageForm {
     pub family: String,
@@ -145,6 +146,9 @@ pub struct MarriageForm {
     pub spouse: String,
     pub date: String,
     pub place: String,
+    pub divorced: bool,
+    pub divorce_date: String,
+    pub divorce_place: String,
 }
 
 /// Events a person can be given in the editor, in the order its menu offers them.
@@ -760,11 +764,15 @@ impl Document {
                     let fam = self.record(&f)?;
                     let spouse = self.spouse_in(&f, xref).and_then(|s| self.person(&s).map(|p| p.display.clone())).unwrap_or_else(|| "unknown partner".into());
                     let marr = fam.child("MARR");
+                    let div = fam.child("DIV");
                     Some(MarriageForm {
                         family: f,
                         spouse,
                         date: marr.map(|m| m.child_value("DATE").to_string()).unwrap_or_default(),
                         place: marr.map(|m| m.child_value("PLAC").to_string()).unwrap_or_default(),
+                        divorced: div.is_some(),
+                        divorce_date: div.map(|d| d.child_value("DATE").to_string()).unwrap_or_default(),
+                        divorce_place: div.map(|d| d.child_value("PLAC").to_string()).unwrap_or_default(),
                     })
                 })
                 .collect(),
@@ -915,6 +923,11 @@ impl Document {
             let (date, place) = (marr.map(|n| n.child_value("DATE")).unwrap_or(""), marr.map(|n| n.child_value("PLAC")).unwrap_or(""));
             if normalize_date(date) != normalize_date(&m.date) || place.trim() != m.place.trim() {
                 set_event(fam, "MARR", &normalize_date(&m.date), &m.place, false);
+            }
+            let div = fam.child("DIV");
+            let (date, place) = (div.map(|n| n.child_value("DATE")).unwrap_or(""), div.map(|n| n.child_value("PLAC")).unwrap_or(""));
+            if div.is_some() != m.divorced || normalize_date(date) != normalize_date(&m.divorce_date) || place.trim() != m.divorce_place.trim() {
+                set_event(fam, "DIV", &normalize_date(&m.divorce_date), &m.divorce_place, m.divorced);
             }
         }
     }
@@ -1654,6 +1667,8 @@ mod tests {
         form.events.remove(1);
         form.events.push(EventForm { origin: None, tag: "EMIG".into(), date: "1885".into(), place: "Liverpool".into(), detail: String::new() });
         form.marriages[1].date = "about 1925".into();
+        form.marriages[1].divorced = true;
+        form.marriages[1].divorce_date = "1931".into();
         doc.mutate(|d| d.apply_form("I1", &form));
 
         let r = doc.record("I1").unwrap();
@@ -1666,8 +1681,19 @@ mod tests {
         assert!(r.child("CENS").is_none());
         assert_eq!(r.child("EMIG").unwrap().child_value("PLAC"), "Liverpool");
         assert_eq!(doc.family_event("F2", "MARR").unwrap().0, "ABT 1925");
+        assert_eq!(doc.family_event("F2", "DIV").unwrap().0, "1931");
         // The first marriage wasn't touched.
         assert_eq!(doc.family_event("F1", "MARR").unwrap().0, "26 February 1889");
+        assert!(doc.record("F1").unwrap().child("DIV").is_none());
+
+        // A divorce with no date is still recorded; undoing it removes it.
+        let mut form = doc.form_for("I1");
+        form.marriages[0].divorced = true;
+        form.marriages[1].divorced = false;
+        form.marriages[1].divorce_date.clear();
+        doc.mutate(|d| d.apply_form("I1", &form));
+        assert_eq!(doc.record("F1").unwrap().child("DIV").unwrap().value, "Y");
+        assert!(doc.record("F2").unwrap().child("DIV").is_none());
     }
 
     #[test]
